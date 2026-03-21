@@ -10,7 +10,9 @@ The project is structured so the GUI, CLI, and backend all use the same `SAM3Ult
 
 Created by **Jeffrey Ian Wilson** with implementation support from **OpenAI Codex**.
 
-Additional project credit details are listed in [CREDITS.md](CREDITS.md).
+## Disclaimer
+
+This application was entirely written by AI, it is strongly recommended to review source code before usage.  All attempts to parse code for security concerns using OpenAI Codex have been made.
 
 ## Features
 
