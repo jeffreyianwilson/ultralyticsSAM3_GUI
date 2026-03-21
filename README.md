@@ -25,11 +25,6 @@ Additional project credit details are listed in [CREDITS.md](CREDITS.md).
 
 ## Current Issues
 
-- Tool writes extremely large cache files for long runs.
-  - 8k image produced 1gb per frame cache size.
-  - Possible solution is to write individual cache masks to a single npy array.
-  - Future feature to enable image downscaling before inference.
-  - Future feature to compress mask arrays.
 - Exemplar prompting not fully supported.
 - Video workflow not thoroughly tested.
 
