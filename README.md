@@ -12,7 +12,7 @@ Created by **Jeffrey Ian Wilson** with implementation support from **OpenAI Code
 
 ## Disclaimer
 
-This application was entirely written by AI, it is strongly recommended to review source code before usage.  All attempts to parse code for security concerns using OpenAI Codex have been made.
+This application was entirely written by AI, it is strongly recommended to review source code before usage.  All attempts to parse code for security concerns using OpenAI Codex have been made.  Use at your own risk.
 
 ## Features
 
