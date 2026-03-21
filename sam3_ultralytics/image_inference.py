@@ -73,6 +73,7 @@ def normalize_ultralytics_result(result, payload: PromptPayload, *, mode: str, f
         frame_index=frame_index,
         mode=mode,
         image_size=tuple(getattr(result, "orig_shape", (0, 0))),
+        inference_image_size=tuple(getattr(result, "orig_shape", (0, 0))),
         objects=objects,
         prompt_metadata=prompt_metadata(payload),
         timings=timings,

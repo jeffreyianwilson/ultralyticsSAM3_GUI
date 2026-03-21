@@ -47,7 +47,8 @@ def render_overlay(
         tint = np.zeros_like(canvas)
         for obj in objects:
             color = color_for_index(obj.object_index)
-            tint[obj.mask.astype(bool)] = color
+            mask = _normalize_union_mask(obj.mask, tuple(canvas.shape[:2])).astype(bool, copy=False)
+            tint[mask] = color
         canvas = cv2.addWeighted(tint, opacity, canvas, 1.0 - opacity, 0.0)
 
     for obj in objects:
@@ -93,14 +94,21 @@ def _normalize_union_mask(mask: np.ndarray, shape: tuple[int, int] | None = None
     return union
 
 
-def merged_mask(result: PredictionResult, *, extra_masks: list[np.ndarray] | None = None) -> np.ndarray | None:
+def merged_mask(
+    result: PredictionResult,
+    *,
+    extra_masks: list[np.ndarray] | None = None,
+    shape: tuple[int, int] | None = None,
+) -> np.ndarray | None:
     """Return a merged binary mask for a result, including prompt and extra masks when present."""
-    reference_shape: tuple[int, int] | None = None
-    if result.objects:
+    reference_shape: tuple[int, int] | None = shape
+    if reference_shape is None and result.image_size is not None:
+        reference_shape = tuple(int(value) for value in result.image_size)
+    if reference_shape is None and result.objects:
         reference_shape = tuple(result.objects[0].mask.shape[:2])
-    elif result.prompt_mask is not None:
+    elif reference_shape is None and result.prompt_mask is not None:
         reference_shape = tuple(np.asarray(result.prompt_mask).shape[:2])
-    elif extra_masks:
+    elif reference_shape is None and extra_masks:
         reference_shape = tuple(np.asarray(extra_masks[0]).shape[:2])
 
     if reference_shape is None:

@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from .exceptions import InferenceCancelledError
+from .inference_scaling import apply_inference_transform, normalize_inference_scale, prepare_inference_source
 from .image_inference import run_image_prediction
 from .io_utils import expand_sources, read_video_frame, video_frame_count
 from .prompt_handling import build_prompt_payload, validate_prompt_payload
@@ -186,6 +187,7 @@ def track_image_sequence(
     text_prompts_by_source: dict[str, Any] | None = None,
     mask_id: int | None = None,
     mask_label: str | None = None,
+    inference_scale: float = 1.0,
     exemplar_adapter=None,
     progress_callback=None,
     cancel_callback=None,
@@ -198,6 +200,7 @@ def track_image_sequence(
     results: list[PredictionResult] = []
     total = len(expanded_sources)
     start = perf_counter()
+    resolved_scale = normalize_inference_scale(inference_scale)
 
     for index, source in enumerate(expanded_sources):
         if cancel_callback is not None and cancel_callback():
@@ -209,11 +212,18 @@ def track_image_sequence(
         frame_text_prompt = _resolve_text(_resolve_per_frame_value(text_prompts_by_source, source_key, text_prompt), None)
         override_mask = _resolve_per_frame_value(mask_inputs, source_key, None)
         current_mask = tracked_mask if override_mask is None else np.asarray(override_mask, dtype=np.float32).copy()
-        payload = build_prompt_payload(
-            text_prompt=frame_text_prompt,
+        inference_source, scaled_points, scaled_boxes, scaled_mask_input, transform = prepare_inference_source(
+            source,
             points=frame_points,
             boxes=frame_boxes,
             mask_input=current_mask,
+            inference_scale=resolved_scale,
+        )
+        payload = build_prompt_payload(
+            text_prompt=frame_text_prompt,
+            points=scaled_points,
+            boxes=scaled_boxes,
+            mask_input=scaled_mask_input,
             exemplar_image=exemplar_image,
             exemplar_box=exemplar_box,
             mask_metadata=_tracking_mask_metadata(
@@ -227,7 +237,8 @@ def track_image_sequence(
             ),
         )
         validate_prompt_payload(payload, is_video=False)
-        result = run_image_prediction(model_loader, source, payload, exemplar_adapter=exemplar_adapter)
+        result = run_image_prediction(model_loader, inference_source, payload, exemplar_adapter=exemplar_adapter)
+        result = apply_inference_transform(result, transform, source=source)
         result.source = str(source)
         result.tracking_metadata.update(
             {
@@ -280,6 +291,7 @@ def track_video_frames(
     text_prompts_by_frame: dict[int, Any] | None = None,
     mask_id: int | None = None,
     mask_label: str | None = None,
+    inference_scale: float = 1.0,
     exemplar_adapter=None,
     progress_callback=None,
     cancel_callback=None,
@@ -296,6 +308,7 @@ def track_video_frames(
     results: list[PredictionResult] = []
     total = len(frame_indices)
     start = perf_counter()
+    resolved_scale = normalize_inference_scale(inference_scale)
 
     for position, frame_index in enumerate(frame_indices):
         if cancel_callback is not None and cancel_callback():
@@ -309,11 +322,18 @@ def track_video_frames(
         frame_text_prompt = _resolve_text(_resolve_per_frame_value(text_prompts_by_frame, frame_index, text_prompt), None)
         override_mask = _resolve_per_frame_value(mask_inputs_by_frame, frame_index, None)
         current_mask = tracked_mask if override_mask is None else np.asarray(override_mask, dtype=np.float32).copy()
-        payload = build_prompt_payload(
-            text_prompt=frame_text_prompt,
+        inference_source, scaled_points, scaled_boxes, scaled_mask_input, transform = prepare_inference_source(
+            frame,
             points=frame_points,
             boxes=frame_boxes,
             mask_input=current_mask,
+            inference_scale=resolved_scale,
+        )
+        payload = build_prompt_payload(
+            text_prompt=frame_text_prompt,
+            points=scaled_points,
+            boxes=scaled_boxes,
+            mask_input=scaled_mask_input,
             exemplar_image=exemplar_image,
             exemplar_box=exemplar_box,
             mask_metadata=_tracking_mask_metadata(
@@ -327,7 +347,8 @@ def track_video_frames(
             ),
         )
         validate_prompt_payload(payload, is_video=True)
-        result = run_image_prediction(model_loader, frame, payload, exemplar_adapter=exemplar_adapter)
+        result = run_image_prediction(model_loader, inference_source, payload, exemplar_adapter=exemplar_adapter)
+        result = apply_inference_transform(result, transform, source=frame)
         result.source = str(source)
         result.mode = "video"
         result.frame_index = frame_index

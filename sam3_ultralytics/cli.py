@@ -49,6 +49,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--merged-masks-only", action="store_true", help="Export a single merged mask per source instead of per-object masks.")
     parser.add_argument("--invert-mask", action="store_true", help="Invert exported mask PNGs.")
     parser.add_argument("--reuse-first-mask", action="store_true", help="Reuse the first predicted mask for subsequent items in image or frame sequences.")
+    parser.add_argument("--inference-scale", type=float, default=1.0, help="Downscale factor applied before inference, between 0.1 and 1.0.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -87,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         "points": args.point or None,
         "boxes": args.box or None,
         "mask_input": args.mask,
+        "inference_scale": args.inference_scale,
     }
     export_kwargs = {
         "output_dir": args.output_dir,

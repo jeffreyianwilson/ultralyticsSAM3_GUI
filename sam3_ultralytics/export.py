@@ -9,8 +9,9 @@ from typing import Any
 import cv2
 import numpy as np
 
+from .cache_store import load_cached_mask
 from .exceptions import ExportError
-from .io_utils import ensure_writable_directory, normalize_mask_input, read_video_frame, source_stem
+from .io_utils import ensure_writable_directory, read_video_frame, source_stem, to_bgr_image
 from .schemas import PredictionResult
 from .visualization import merged_mask, render_overlay
 
@@ -64,8 +65,26 @@ def _dilate_mask_image(image: np.ndarray, dilation_pixels: int) -> np.ndarray:
     return (dilated * 255).astype(np.uint8)
 
 
-def _mask_to_png(mask: np.ndarray, *, invert_mask: bool, dilation_pixels: int = 0) -> np.ndarray:
+def _result_target_shape(result: PredictionResult, fallback_image: np.ndarray | None = None) -> tuple[int, int] | None:
+    if result.image_size is not None:
+        return tuple(int(value) for value in result.image_size)
+    if fallback_image is not None:
+        return tuple(int(value) for value in fallback_image.shape[:2])
+    if result.inference_image_size is not None:
+        return tuple(int(value) for value in result.inference_image_size)
+    return None
+
+
+def _mask_to_png(
+    mask: np.ndarray,
+    *,
+    invert_mask: bool,
+    dilation_pixels: int = 0,
+    target_shape: tuple[int, int] | None = None,
+) -> np.ndarray:
     array = np.asarray(mask)
+    if target_shape is not None and tuple(array.shape[:2]) != tuple(target_shape):
+        array = cv2.resize(array.astype(np.float32), (int(target_shape[1]), int(target_shape[0])), interpolation=cv2.INTER_NEAREST)
     if array.dtype == np.bool_:
         image = array.astype(np.uint8) * 255
     elif np.issubdtype(array.dtype, np.floating):
@@ -89,9 +108,9 @@ def _result_manual_mask(result: PredictionResult, manual_masks_by_key: dict[str,
     if result.frame_index is not None and result.source:
         key = f"{result.source}::frame:{int(result.frame_index)}"
         if key in manual_masks_by_key:
-            return normalize_mask_input(manual_masks_by_key[key])[0]
+            return load_cached_mask(manual_masks_by_key[key])
     if result.source and result.source in manual_masks_by_key:
-        return normalize_mask_input(manual_masks_by_key[result.source])[0]
+        return load_cached_mask(manual_masks_by_key[result.source])
     return None
 
 
@@ -111,12 +130,17 @@ def _export_image_masks(
     mask_paths: list[str] = []
     if mask_dir is None:
         return mask_paths, export_paths
+    target_shape = _result_target_shape(result)
 
     if merged_mask_only:
-        merged = merged_mask(result, extra_masks=[manual_mask] if manual_mask is not None else None)
+        merged = merged_mask(result, extra_masks=[manual_mask] if manual_mask is not None else None, shape=target_shape)
         if merged is not None:
             merged_path = mask_dir / image_merged_mask_filename(base_name)
-            _write_png(merged_path, _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels), overwrite=overwrite)
+            _write_png(
+                merged_path,
+                _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+                overwrite=overwrite,
+            )
             merged_path_str = str(merged_path)
             export_paths["masks"].append(merged_path_str)
             export_paths["merged_mask"] = merged_path_str
@@ -125,16 +149,24 @@ def _export_image_masks(
 
     for obj in result.objects:
         mask_path = mask_dir / image_mask_filename(base_name, obj.object_index, obj.track_id)
-        _write_png(mask_path, _mask_to_png(obj.mask, invert_mask=invert_mask, dilation_pixels=dilation_pixels), overwrite=overwrite)
+        _write_png(
+            mask_path,
+            _mask_to_png(obj.mask, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+            overwrite=overwrite,
+        )
         mask_path_str = str(mask_path)
         mask_paths.append(mask_path_str)
         export_paths["masks"].append(mask_path_str)
 
     if save_merged_mask:
-        merged = merged_mask(result, extra_masks=[manual_mask] if manual_mask is not None else None)
+        merged = merged_mask(result, extra_masks=[manual_mask] if manual_mask is not None else None, shape=target_shape)
         if merged is not None:
             merged_path = mask_dir / image_merged_mask_filename(base_name)
-            _write_png(merged_path, _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels), overwrite=overwrite)
+            _write_png(
+                merged_path,
+                _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+                overwrite=overwrite,
+            )
             export_paths["merged_mask"] = str(merged_path)
 
     return mask_paths, export_paths
@@ -161,6 +193,14 @@ def _export_image_result(
     base_name = source_stem(result.source or "image")
     output_dir = output_dir or mask_dir
     manual_mask = _result_manual_mask(result, manual_masks_by_key)
+    base_image = None
+    if result.image is not None:
+        base_image = np.asarray(result.image)
+    elif result.source:
+        try:
+            base_image = to_bgr_image(result.source)
+        except Exception:
+            base_image = None
     mask_paths, export_paths = _export_image_masks(
         result,
         base_name=base_name,
@@ -173,17 +213,26 @@ def _export_image_result(
         dilation_pixels=dilation_pixels,
     )
 
-    if output_dir is not None and result.image is not None:
+    if output_dir is not None and base_image is not None:
         if save_overlay:
             overlay_path = output_dir / f"{base_name}_overlay.png"
-            overlay = render_overlay(result.image, result)
+            overlay = render_overlay(base_image, result)
             _write_png(overlay_path, overlay, overwrite=overwrite)
             export_paths["overlay"] = str(overlay_path)
         if save_cutout:
-            union = merged_mask(result, extra_masks=[manual_mask] if manual_mask is not None else None)
+            union = merged_mask(
+                result,
+                extra_masks=[manual_mask] if manual_mask is not None else None,
+                shape=_result_target_shape(result, base_image),
+            )
             if union is not None:
-                rgba = cv2.cvtColor(result.image, cv2.COLOR_BGR2BGRA)
-                rgba[:, :, 3] = _mask_to_png(union, invert_mask=False, dilation_pixels=dilation_pixels).astype(np.uint8)
+                rgba = cv2.cvtColor(base_image, cv2.COLOR_BGR2BGRA)
+                rgba[:, :, 3] = _mask_to_png(
+                    union,
+                    invert_mask=False,
+                    dilation_pixels=dilation_pixels,
+                    target_shape=tuple(base_image.shape[:2]),
+                ).astype(np.uint8)
                 cutout_path = output_dir / f"{base_name}_cutout.png"
                 _write_png(cutout_path, rgba, overwrite=overwrite)
                 export_paths["cutout"] = str(cutout_path)
@@ -298,21 +347,30 @@ def _export_video_results(
         for index, result in enumerate(results, start=1):
             assert result.frame_index is not None
             frame = read_video_frame(source, result.frame_index)
+            target_shape = _result_target_shape(result, frame)
             mask_paths: list[str] = []
             if masks_dir is not None:
                 manual_mask = _result_manual_mask(result, manual_masks_by_key)
                 if merged_mask_only:
-                    merged = merged_mask(result, extra_masks=[manual_mask] if manual_mask is not None else None)
+                    merged = merged_mask(result, extra_masks=[manual_mask] if manual_mask is not None else None, shape=target_shape)
                     if merged is not None:
                         mask_path = masks_dir / video_merged_mask_filename(result.frame_index)
-                        _write_png(mask_path, _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels), overwrite=overwrite)
+                        _write_png(
+                            mask_path,
+                            _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+                            overwrite=overwrite,
+                        )
                         mask_path_str = str(mask_path)
                         mask_paths = [mask_path_str] * len(result.objects)
                         export_paths["masks"].append(mask_path_str)
                 else:
                     for obj in result.objects:
                         mask_path = masks_dir / video_mask_filename(result.frame_index, obj.object_index, obj.track_id)
-                        _write_png(mask_path, _mask_to_png(obj.mask, invert_mask=invert_mask, dilation_pixels=dilation_pixels), overwrite=overwrite)
+                        _write_png(
+                            mask_path,
+                            _mask_to_png(obj.mask, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+                            overwrite=overwrite,
+                        )
                         mask_path_str = str(mask_path)
                         mask_paths.append(mask_path_str)
                         export_paths["masks"].append(mask_path_str)

@@ -113,6 +113,7 @@ sam3-ultralytics
 - Select the SAM 3 checkpoint in `Model`
 - Select `Device`
 - Choose a `Cache` directory for disk-backed inference state
+- Enable `Use compact cache archives (recommended)` to store masks in compact v2 archives instead of large raster cache files
 - Use `Clear Cache` when you want to reset the cache directory
 
 ### 2. Load a Source
@@ -129,6 +130,8 @@ Inside the `Inference` rollout:
   - `Current Image / Frame`
   - `Entire Folder / Video`
 - `Confidence`
+- `Downscale before inference`
+- `Scale Factor`
 - `Text Prompt`
 - `Load Mask` for prompt-mask inference
 - `Prompt Class`
@@ -267,7 +270,7 @@ sam3-ultralytics image --model "D:\cache\models\sam3.pt" --device cuda:0 --text 
 Directory:
 
 ```powershell
-sam3-ultralytics image --model "D:\cache\models\sam3.pt" --text person --all-items "D:\images"
+sam3-ultralytics image --model "D:\cache\models\sam3.pt" --text person --all-items --inference-scale 0.5 "D:\images"
 ```
 
 Video tracking:
@@ -279,7 +282,7 @@ sam3-ultralytics video-track --model "D:\cache\models\sam3.pt" --mask "D:\masks\
 Mixed batch:
 
 ```powershell
-sam3-ultralytics batch --model "D:\cache\models\sam3.pt" --text person "D:\images" "D:\clips\clip.mp4"
+sam3-ultralytics batch --model "D:\cache\models\sam3.pt" --text person --inference-scale 0.5 "D:\images" "D:\clips\clip.mp4"
 ```
 
 ## Caching and Memory Behavior
@@ -292,6 +295,11 @@ What is cached:
 - manual masks
 - inference result masks
 - Ultralytics writable settings/config under the cache directory
+- versioned cache data under the selected cache root in a `v2` namespace
+
+When compact cache archives are enabled, result masks are stored as cropped, bit-packed per-frame archives instead of full-frame raster `.npy` files.
+
+When inference downscale is enabled, SAM 3 runs on the reduced frame size for speed and memory savings, while exports and overlays are restored to the original source dimensions.
 
 This keeps large mask arrays off memory across longer sessions and makes repeated GUI use more stable on large inputs.
 
@@ -336,3 +344,20 @@ C:\Users\jeffr\.conda\envs\ultralytics\python.exe -c "import torch; print(torch.
 ### Reset the app cache
 
 Use `Clear Cache` in the GUI, or delete the configured cache directory manually.
+
+## Changelog
+
+### 2026-03-21
+
+- Added compact v2 cache archives with cropped, bit-packed mask storage to cut per-frame cache size dramatically.
+- Added downscaled inference for image, folder, and video workflows with original-size export restoration.
+- Added `inference_image_size` to normalized results and `--inference-scale` to the CLI.
+- Updated rendering and export so cached inference masks can stay compact while overlays and exported masks match the original source dimensions.
+
+### 2026-03-20
+
+- Optimized cached mask storage from float32 raster arrays to binary masks and documented official SAM 3 checkpoint setup.
+- Added project credits to the README and repository metadata.
+- Published the runtime-focused `ultralyticsSAM3_GUI` repo structure with GUI, backend, CLI, and export pipeline.
+- Added disk-backed cache selection, reusable backend/model loading, and manual mask tooling in the GUI.
+- Added image, folder, and video workflows with text, point, box, and mask prompting plus export controls.

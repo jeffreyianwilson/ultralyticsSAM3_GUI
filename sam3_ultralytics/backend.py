@@ -9,6 +9,7 @@ import numpy as np
 
 from .exceptions import InferenceCancelledError, ModelNotLoadedError
 from .export import save_results as export_results
+from .inference_scaling import apply_inference_transform, normalize_inference_scale, prepare_inference_source
 from .image_inference import run_image_prediction
 from .io_utils import expand_sources, is_video_path, read_video_frame, video_frame_count
 from .model_loading import ModelLoader
@@ -119,6 +120,7 @@ class SAM3Ultralytics:
         mask_id: int | None = None,
         mask_label: str | None = None,
         mask_metadata: dict[str, Any] | None = None,
+        inference_scale: float = 1.0,
         export_mask_dir: str | Path | None = None,
         output_dir: str | Path | None = None,
         overwrite: bool = True,
@@ -126,17 +128,26 @@ class SAM3Ultralytics:
         invert_mask: bool = False,
     ) -> PredictionResult:
         """Run image segmentation against a single image-like input."""
-        payload = build_prompt_payload(
-            text_prompt=text_prompt,
+        resolved_scale = normalize_inference_scale(inference_scale)
+        inference_source, scaled_points, scaled_boxes, scaled_mask_input, transform = prepare_inference_source(
+            source,
             points=points,
             boxes=boxes,
             mask_input=mask_input,
+            inference_scale=resolved_scale,
+        )
+        payload = build_prompt_payload(
+            text_prompt=text_prompt,
+            points=scaled_points,
+            boxes=scaled_boxes,
+            mask_input=scaled_mask_input,
             exemplar_image=exemplar_image,
             exemplar_box=exemplar_box,
             mask_metadata=self._mask_metadata(mask_id, mask_label, mask_metadata),
         )
         validate_prompt_payload(payload, is_video=False)
-        result = run_image_prediction(self.model_loader, source, payload, exemplar_adapter=self.exemplar_adapter)
+        result = run_image_prediction(self.model_loader, inference_source, payload, exemplar_adapter=self.exemplar_adapter)
+        result = apply_inference_transform(result, transform, source=source)
         if export_mask_dir is not None or output_dir is not None:
             export_results(
                 result,
@@ -165,6 +176,7 @@ class SAM3Ultralytics:
         text_prompts_by_source: dict[str, Any] | None = None,
         mask_id: int | None = None,
         mask_label: str | None = None,
+        inference_scale: float = 1.0,
         export_mask_dir: str | Path | None = None,
         output_dir: str | Path | None = None,
         overwrite: bool = True,
@@ -189,6 +201,7 @@ class SAM3Ultralytics:
             text_prompts_by_source=text_prompts_by_source,
             mask_id=mask_id,
             mask_label=mask_label,
+            inference_scale=inference_scale,
             exemplar_adapter=self.exemplar_adapter,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
@@ -223,6 +236,7 @@ class SAM3Ultralytics:
         first_mask_initializer_only: bool = False,
         mask_id: int | None = None,
         mask_label: str | None = None,
+        inference_scale: float = 1.0,
         export_mask_dir: str | Path | None = None,
         output_dir: str | Path | None = None,
         overwrite: bool = True,
@@ -274,6 +288,7 @@ class SAM3Ultralytics:
                 mask_input=current_mask,
                 mask_id=mask_id,
                 mask_label=mask_label,
+                inference_scale=inference_scale,
             )
             reference_mask = None
             if current_mask is not None:
@@ -341,6 +356,7 @@ class SAM3Ultralytics:
         points=None,
         boxes=None,
         mask_input=None,
+        inference_scale: float = 1.0,
         export_mask_dir: str | Path | None = None,
         output_dir: str | Path | None = None,
         annotated_video_path: str | Path | None = None,
@@ -359,6 +375,7 @@ class SAM3Ultralytics:
             points=points,
             boxes=boxes,
             mask_input=mask_input,
+            inference_scale=inference_scale,
             export_mask_dir=export_mask_dir,
             output_dir=output_dir,
             annotated_video_path=annotated_video_path,
@@ -385,6 +402,7 @@ class SAM3Ultralytics:
         first_mask_initializer_only: bool = False,
         mask_id: int | None = None,
         mask_label: str | None = None,
+        inference_scale: float = 1.0,
         export_mask_dir: str | Path | None = None,
         output_dir: str | Path | None = None,
         annotated_video_path: str | Path | None = None,
@@ -434,6 +452,7 @@ class SAM3Ultralytics:
                 mask_input=current_mask,
                 mask_id=mask_id,
                 mask_label=mask_label,
+                inference_scale=inference_scale,
             )
             result.source = str(source)
             result.mode = "video"
@@ -477,6 +496,7 @@ class SAM3Ultralytics:
         text_prompts_by_frame: dict[int, Any] | None = None,
         mask_id: int | None = None,
         mask_label: str | None = None,
+        inference_scale: float = 1.0,
         export_mask_dir: str | Path | None = None,
         output_dir: str | Path | None = None,
         overwrite: bool = True,
@@ -502,6 +522,7 @@ class SAM3Ultralytics:
             text_prompts_by_frame=text_prompts_by_frame,
             mask_id=mask_id,
             mask_label=mask_label,
+            inference_scale=inference_scale,
             exemplar_adapter=self.exemplar_adapter,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
@@ -534,6 +555,7 @@ class SAM3Ultralytics:
         text_prompts_by_frame: dict[int, Any] | None = None,
         mask_id: int | None = None,
         mask_label: str | None = None,
+        inference_scale: float = 1.0,
         export_mask_dir: str | Path | None = None,
         output_dir: str | Path | None = None,
         annotated_video_path: str | Path | None = None,
@@ -554,6 +576,7 @@ class SAM3Ultralytics:
                 points_by_frame,
                 boxes_by_frame,
                 text_prompts_by_frame,
+                normalize_inference_scale(inference_scale) < 0.999,
             ]
         )
         if compatibility_tracking:
@@ -572,6 +595,7 @@ class SAM3Ultralytics:
                 text_prompts_by_frame=text_prompts_by_frame,
                 mask_id=mask_id,
                 mask_label=mask_label,
+                inference_scale=inference_scale,
                 exemplar_adapter=self.exemplar_adapter,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
@@ -620,6 +644,7 @@ class SAM3Ultralytics:
         points=None,
         boxes=None,
         mask_input=None,
+        inference_scale: float = 1.0,
         export_mask_dir: str | Path | None = None,
         output_dir: str | Path | None = None,
         overwrite: bool = True,
@@ -642,6 +667,7 @@ class SAM3Ultralytics:
                     points=points,
                     boxes=boxes,
                     mask_input=mask_input,
+                    inference_scale=inference_scale,
                     export_mask_dir=export_mask_dir,
                     output_dir=output_dir,
                     overwrite=overwrite,
@@ -655,6 +681,7 @@ class SAM3Ultralytics:
                     points=points,
                     boxes=boxes,
                     mask_input=mask_input,
+                    inference_scale=inference_scale,
                     export_mask_dir=export_mask_dir,
                     output_dir=output_dir,
                     overwrite=overwrite,

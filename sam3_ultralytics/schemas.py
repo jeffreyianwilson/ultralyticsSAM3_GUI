@@ -122,6 +122,7 @@ class PredictionResult:
     frame_index: int | None
     mode: str
     image_size: tuple[int, int] | None
+    inference_image_size: tuple[int, int] | None = None
     objects: list[SegmentationObject] = field(default_factory=list)
     prompt_metadata: dict[str, Any] = field(default_factory=dict)
     tracking_metadata: dict[str, Any] = field(default_factory=dict)
@@ -167,6 +168,7 @@ class PredictionResult:
             "frame_index": self.frame_index,
             "mode": self.mode,
             "image_size": list(self.image_size) if self.image_size is not None else None,
+            "inference_image_size": list(self.inference_image_size) if self.inference_image_size is not None else None,
             "object_count": len(self.objects),
             "objects": [
                 item.to_dict(mask_path=mask_paths[index]) for index, item in enumerate(self.objects)

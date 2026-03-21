@@ -19,6 +19,9 @@ class GUIState:
     source_frame_count: int | None = None
     export_dir: str | None = None
     cache_dir: str | None = None
+    compact_cache_enabled: bool = True
+    inference_scale_enabled: bool = False
+    inference_scale: float = 1.0
     mask_path: str | None = None
     mask_input: np.ndarray | None = None
     mask_source: str | None = None

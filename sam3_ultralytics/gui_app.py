@@ -9,7 +9,7 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .backend import SAM3Ultralytics
-from .cache_store import CacheStore
+from .cache_store import CacheStore, load_cached_mask
 from .gui_state import GUIState
 from .gui_widgets import PreviewCanvas
 from .gui_workers import BackendTask
@@ -81,6 +81,9 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         cache_row.addWidget(self.cache_dir_edit)
         cache_row.addWidget(self.cache_browse_button)
         form.addRow("Cache", cache_row)
+        self.compact_cache_checkbox = QtWidgets.QCheckBox("Use compact cache archives (recommended)")
+        self.compact_cache_checkbox.setChecked(True)
+        form.addRow("", self.compact_cache_checkbox)
         self.clear_cache_button = QtWidgets.QPushButton("Clear Cache")
         form.addRow("", self.clear_cache_button)
         controls_layout.addLayout(form)
@@ -110,6 +113,15 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.confidence_spin.setValue(0.25)
         inference_form.addRow("Run Scope", self.run_scope_combo)
         inference_form.addRow("Confidence", self.confidence_spin)
+        self.downscale_inference_checkbox = QtWidgets.QCheckBox("Downscale before inference")
+        self.inference_scale_spin = QtWidgets.QDoubleSpinBox()
+        self.inference_scale_spin.setRange(0.1, 1.0)
+        self.inference_scale_spin.setDecimals(2)
+        self.inference_scale_spin.setSingleStep(0.05)
+        self.inference_scale_spin.setValue(1.0)
+        self.inference_scale_spin.setEnabled(False)
+        inference_form.addRow(self.downscale_inference_checkbox)
+        inference_form.addRow("Scale Factor", self.inference_scale_spin)
         inference_layout.addLayout(inference_form)
 
         self.text_prompt_edit = QtWidgets.QLineEdit()
@@ -298,6 +310,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.model_browse_button.clicked.connect(self._browse_model)
         self.cache_browse_button.clicked.connect(self._browse_cache_dir)
         self.clear_cache_button.clicked.connect(self._clear_cache_dir)
+        self.compact_cache_checkbox.toggled.connect(self._set_compact_cache_mode)
+        self.downscale_inference_checkbox.toggled.connect(self._toggle_inference_scale)
         self.open_image_button.clicked.connect(self._open_image)
         self.open_directory_button.clicked.connect(self._open_directory)
         self.open_video_button.clicked.connect(self._open_video)
@@ -342,7 +356,13 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
     def _apply_defaults(self) -> None:
         self.model_combo.addItem(r"D:\cache\models\sam3.pt")
         self.state.cache_dir = str(self.cache_store.root)
+        self.state.compact_cache_enabled = self.cache_store.compact_archives
         self.cache_dir_edit.setText(str(self.cache_store.root))
+        self.compact_cache_checkbox.setChecked(self.state.compact_cache_enabled)
+        self.state.inference_scale_enabled = False
+        self.state.inference_scale = 1.0
+        self.downscale_inference_checkbox.setChecked(False)
+        self.inference_scale_spin.setValue(1.0)
         self.opacity_slider.setValue(45)
         self._set_brush_size(self.brush_slider.value())
         self._refresh_view_filters()
@@ -504,12 +524,41 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Cleared cache: {self.cache_store.root}")
         self._append_log(f"Cleared cache directory: {self.cache_store.root}")
 
+    def _set_compact_cache_mode(self, checked: bool) -> None:
+        if self.current_task is not None:
+            self.compact_cache_checkbox.blockSignals(True)
+            self.compact_cache_checkbox.setChecked(self.cache_store.compact_archives)
+            self.compact_cache_checkbox.blockSignals(False)
+            QtWidgets.QMessageBox.warning(self, "Busy", "Wait for the current task to finish before changing cache layout.")
+            return
+        self.cache_store.compact_archives = bool(checked)
+        self.state.compact_cache_enabled = bool(checked)
+        mode_text = "compact cache archives enabled" if checked else "legacy cache layout enabled"
+        self.statusBar().showMessage(mode_text)
+        self._append_log(mode_text)
+
+    def _toggle_inference_scale(self, checked: bool) -> None:
+        self.state.inference_scale_enabled = bool(checked)
+        self.inference_scale_spin.setEnabled(bool(checked))
+        if not checked:
+            self.state.inference_scale = 1.0
+
+    def _current_inference_scale(self) -> float:
+        if not self.downscale_inference_checkbox.isChecked():
+            self.state.inference_scale_enabled = False
+            self.state.inference_scale = 1.0
+            return 1.0
+        self.state.inference_scale_enabled = True
+        self.state.inference_scale = float(self.inference_scale_spin.value())
+        return self.state.inference_scale
+
     def _switch_cache_dir(self, path: str) -> None:
         self.cache_store.set_root(path)
         self.backend = None
         self._backend_signature = None
         self._clear_all()
         self.state.cache_dir = str(self.cache_store.root)
+        self.state.compact_cache_enabled = self.cache_store.compact_archives
         self.cache_dir_edit.setText(self.state.cache_dir)
         self.statusBar().showMessage(f"Using cache: {self.cache_store.root}")
         self._append_log(f"Using cache directory: {self.cache_store.root}")
@@ -546,7 +595,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         return "".join(char if char.isalnum() else "_" for char in text)[:80] or "item"
 
     def _load_cached_mask(self, mask_ref: object) -> np.ndarray | None:
-        mask, _metadata = normalize_mask_input(mask_ref)
+        mask = load_cached_mask(mask_ref)
         if mask is None:
             return None
         return np.asarray(mask, dtype=np.float32)
@@ -1209,18 +1258,20 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             return
         prompt_kwargs = self._prompt_kwargs()
         current_index = self.seek_slider.value()
+        inference_scale = self._current_inference_scale()
 
         def job(progress_callback=None, cancel_callback=None, item_start_callback=None, item_result_callback=None):
             backend = self._create_backend()
             self.backend = backend
             if self.state.source_kind == "image":
-                return backend.predict_image(self.state.source_path, **prompt_kwargs)
+                return backend.predict_image(self.state.source_path, inference_scale=inference_scale, **prompt_kwargs)
             if self.state.source_kind == "directory":
                 source = self.state.source_items[min(current_index, len(self.state.source_items) - 1)]
-                return backend.predict_image(source, **prompt_kwargs)
+                return backend.predict_image(source, inference_scale=inference_scale, **prompt_kwargs)
             results = backend.predict_video_frames(
                 self.state.source_path,
                 frame_indices=[current_index],
+                inference_scale=inference_scale,
                 **prompt_kwargs,
             )
             return results[0] if results else None
@@ -1265,6 +1316,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         video_points_map = self._video_points_map()
         video_boxes_map = self._video_boxes_map()
         video_text_map = self._video_text_map()
+        inference_scale = self._current_inference_scale()
 
         effective_run_scope = run_scope
 
@@ -1300,6 +1352,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 video_points_map=video_points_map,
                 video_boxes_map=video_boxes_map,
                 video_text_map=video_text_map,
+                inference_scale=inference_scale,
             )
             return
 
@@ -1313,6 +1366,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     output_dir=None,
                     merged_mask_only=merged_mask_only,
                     invert_mask=invert_mask,
+                    inference_scale=inference_scale,
                     **prompt_kwargs,
                 )
             if self.state.source_kind == "directory":
@@ -1324,6 +1378,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                         output_dir=None,
                         merged_mask_only=merged_mask_only,
                         invert_mask=invert_mask,
+                        inference_scale=inference_scale,
                         **prompt_kwargs,
                     )
                 if first_sequence_mask is not None and progress_callback is not None:
@@ -1350,6 +1405,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     cancel_callback=cancel_callback,
                     item_start_callback=item_start_callback,
                     item_result_callback=item_result_callback,
+                    inference_scale=inference_scale,
                 )
             if effective_run_scope == "current":
                 results = backend.predict_video_frames(
@@ -1363,6 +1419,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     cancel_callback=cancel_callback,
                     item_start_callback=item_start_callback,
                     item_result_callback=item_result_callback,
+                    inference_scale=inference_scale,
                     **prompt_kwargs,
                 )
                 return results[0] if results else None
@@ -1387,6 +1444,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     cancel_callback=cancel_callback,
                     item_start_callback=item_start_callback,
                     item_result_callback=item_result_callback,
+                    inference_scale=inference_scale,
                 )
             return backend.track_video(
                 self.state.source_path,
@@ -1404,6 +1462,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 cancel_callback=cancel_callback,
                 item_start_callback=item_start_callback,
                 item_result_callback=item_result_callback,
+                inference_scale=inference_scale,
             )
 
         self.current_task = BackendTask(job)
@@ -1454,6 +1513,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         video_points_map,
         video_boxes_map,
         video_text_map,
+        inference_scale: float,
     ) -> None:
         items = list(self.state.source_items) if self.state.source_kind == "directory" else list(range(int(self.state.source_frame_count or 0)))
         normalized_directory_mask_map = {
@@ -1487,6 +1547,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             "video_points_map": video_points_map or {},
             "video_boxes_map": video_boxes_map or {},
             "video_text_map": video_text_map or {},
+            "inference_scale": inference_scale,
             "export_dir": export_dir,
             "auto_export_dir": auto_export_dir,
             "merged_mask_only": merged_mask_only,
@@ -1540,6 +1601,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     mask_input=context["directory_mask_map"].get(str(source)),
                     mask_id=context["mask_id"],
                     mask_label=context["mask_label"],
+                    inference_scale=context["inference_scale"],
                 )
 
             frame_index = int(context["items"][index])
@@ -1557,6 +1619,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     text_prompts_by_frame=context["video_text_map"] or None,
                     mask_id=context["mask_id"],
                     mask_label=context["mask_label"],
+                    inference_scale=context["inference_scale"],
                     cancel_callback=cancel_callback,
                 )
                 return results[0] if results else None
@@ -1569,6 +1632,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 mask_input=context["video_mask_map"].get(frame_index),
                 mask_id=context["mask_id"],
                 mask_label=context["mask_label"],
+                inference_scale=context["inference_scale"],
                 cancel_callback=cancel_callback,
             )
             return results[0] if results else None
@@ -1658,6 +1722,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             frame_index=incoming.frame_index if incoming.frame_index is not None else existing.frame_index,
             mode=incoming.mode or existing.mode,
             image_size=incoming.image_size or existing.image_size,
+            inference_image_size=incoming.inference_image_size or existing.inference_image_size,
             objects=objects,
             prompt_metadata=dict(incoming.prompt_metadata or existing.prompt_metadata),
             tracking_metadata=dict(incoming.tracking_metadata or existing.tracking_metadata),
@@ -1811,6 +1876,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             [
                 f"Source: {result.source}",
                 f"Mode: {result.mode}",
+                f"Image Size: {result.image_size}",
+                f"Inference Size: {result.inference_image_size}",
                 f"Objects: {len(result.objects)}",
                 f"Prompts: {result.prompt_metadata}",
                 f"Tracking: {result.tracking_metadata}",

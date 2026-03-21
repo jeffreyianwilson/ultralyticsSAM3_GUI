@@ -125,6 +125,10 @@ def _mask_array_from_source(mask_input: MaskSource) -> tuple[np.ndarray, str]:
             return np.load(path), str(path)
         if path.suffix.lower() == ".npz":
             with np.load(path) as archive:
+                if "metadata_json" in archive.files:
+                    from .cache_store import load_cached_mask
+
+                    return np.asarray(load_cached_mask(path)), str(path)
                 first_key = next(iter(archive.files), None)
                 if first_key is None:
                     raise InvalidSourceError(f"Mask archive is empty: {path}")
