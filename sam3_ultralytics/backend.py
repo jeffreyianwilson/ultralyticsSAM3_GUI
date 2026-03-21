@@ -78,6 +78,8 @@ class SAM3Ultralytics:
         if half is not None:
             self.half = half
 
+        # ModelLoader owns the Ultralytics predictor lifecycle. Rebuilding it is
+        # the expensive step, so the GUI tries hard to reuse this backend.
         self._model_loader = ModelLoader(
             self.model_path,
             device=self.device,

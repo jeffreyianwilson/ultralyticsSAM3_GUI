@@ -162,6 +162,8 @@ class PreviewCanvas(QtWidgets.QWidget):
     def _paint_manual_segment(self, start: tuple[float, float], end: tuple[float, float]) -> None:
         if not self._ensure_editable_manual_mask():
             return
+        # Brush painting is applied to a temporary stroke mask first so add/remove
+        # operations stay simple and deterministic on the stored manual mask layer.
         stroke = np.zeros_like(self._manual_mask_preview, dtype=np.float32)
         start_pt = (int(round(start[0])), int(round(start[1])))
         end_pt = (int(round(end[0])), int(round(end[1])))
@@ -198,6 +200,8 @@ class PreviewCanvas(QtWidgets.QWidget):
             self._drag_current = mapped
             self.update()
         elif self._tool == "manual_mask" and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            # Manual mask mode supports polygon creation by default, with
+            # Shift/Ctrl converting the same tool into additive/subtractive brush edits.
             modifiers = event.modifiers()
             if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
                 self._painting_manual_mask = True

@@ -121,6 +121,9 @@ class CacheStore:
             prompt_mask = DiskMaskArray(prompt_mask_path)
         image = None
         if result.image is not None:
+            # Keep source images only when the GUI cannot cheaply rehydrate them
+            # from disk. This preserves preview correctness while pushing large
+            # mask payloads and most frame data out of process memory.
             if result.mode == "video" and result.source and Path(str(result.source)).exists():
                 image = None
             elif result.source and Path(str(result.source)).exists():

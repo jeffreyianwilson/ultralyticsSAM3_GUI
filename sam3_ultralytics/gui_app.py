@@ -1039,6 +1039,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
 
     def _create_backend(self) -> SAM3Ultralytics:
         signature = self._backend_settings_signature()
+        # Keep a hot backend around for iterative GUI use. Reload only when a
+        # runtime-affecting setting changes so repeated runs avoid model startup cost.
         if self.backend is not None and self._backend_signature == signature:
             return self.backend
         backend = SAM3Ultralytics(
@@ -1506,6 +1508,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.progress_bar.setFormat(run_label)
         self.statusBar().showMessage(run_label)
         self._append_log(run_label)
+        # Process long folder/video runs one item at a time so the GUI can
+        # repaint the current frame, show the loaded result, and then advance.
         self._launch_next_sequence_item()
 
     def _launch_next_sequence_item(self) -> None:
@@ -1526,6 +1530,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             self.backend = backend
             if kind == "directory":
                 source = context["items"][index]
+                # Folder runs are intentionally per-image inference, not hidden
+                # tracking, so each image only uses prompts explicitly assigned to it.
                 return backend.predict_image(
                     source,
                     text_prompt=context["directory_text_map"].get(str(source), context["base_text_prompt"]),
@@ -1589,6 +1595,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         if context["next_index"] >= total:
             self._finalize_incremental_sequence_run()
             return
+        # Queue the next item back through the event loop so the frame/result
+        # refresh becomes visible before the next inference starts.
         QtCore.QTimer.singleShot(0, self._launch_next_sequence_item)
 
     def _handle_sequence_item_error(self, message: str) -> None:

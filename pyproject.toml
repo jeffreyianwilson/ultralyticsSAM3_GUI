@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "API-first SAM 3 wrapper over Ultralytics with a PySide6 desktop GUI and CLI."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{name = "OpenAI Codex"}]
+authors = [
+  {name = "Jeffrey Ian Wilson"},
+  {name = "OpenAI Codex"},
+]
 dependencies = [
   "numpy>=1.26",
   "opencv-python>=4.10",
@@ -27,6 +30,9 @@ dev = [
 [project.scripts]
 sam3-gui = "sam3_ultralytics.gui:main"
 sam3-ultralytics = "sam3_ultralytics.cli:main"
+
+[project.urls]
+Repository = "https://github.com/jeffreyianwilson/ultralyticsSAM3_GUI"
 
 [tool.setuptools.packages.find]
 include = ["sam3_ultralytics*"]
