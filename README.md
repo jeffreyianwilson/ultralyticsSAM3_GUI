@@ -4,6 +4,8 @@
 
 The project is structured so the GUI, CLI, and backend all use the same `SAM3Ultralytics` runtime layer.
 
+<img width="2554" height="1391" alt="image" src="https://github.com/user-attachments/assets/026f126a-f7e0-413a-8778-cd0af315ebbb" />
+
 ## Credits
 
 Created by **Jeffrey Ian Wilson** with implementation support from **OpenAI Codex**.
