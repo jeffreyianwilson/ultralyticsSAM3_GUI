@@ -53,6 +53,34 @@ Runtime dependencies declared in `pyproject.toml`:
 - `ultralytics`
 - `clip` from the Ultralytics CLIP repository
 
+## Download the SAM 3 Checkpoint
+
+This app expects a SAM 3 checkpoint file such as `sam3.pt`.
+
+The official Meta SAM 3 repository points users to the gated Hugging Face model page for checkpoint access:
+
+- Meta SAM 3 repo: [facebookresearch/sam3](https://github.com/facebookresearch/sam3)
+- Official checkpoint page: [facebook/sam3 on Hugging Face](https://huggingface.co/facebook/sam3)
+
+Typical flow:
+
+1. Request access on the Hugging Face `facebook/sam3` page.
+2. Sign in with the Hugging Face CLI if needed:
+
+```bash
+huggingface-cli login
+```
+
+3. Download `sam3.pt` from the model page, or place the checkpoint where you want to keep local models, for example:
+
+```text
+D:\cache\models\sam3.pt
+```
+
+4. In the GUI, use the `Model` selector to point the app at that checkpoint.
+
+If you already have `sam3.pt`, you do not need to download it again.
+
 ## Launch
 
 Run the GUI:

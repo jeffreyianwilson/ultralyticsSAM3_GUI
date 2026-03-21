@@ -12,6 +12,16 @@ import numpy as np
 from .schemas import PredictionResult, SegmentationObject
 
 
+def _cache_mask_array(array: np.ndarray) -> np.ndarray:
+    """Store cached masks as compact binary arrays instead of float32 payloads."""
+    mask = np.asarray(array)
+    if mask.dtype == np.bool_:
+        return mask
+    if np.issubdtype(mask.dtype, np.floating):
+        return np.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0) > 0.5
+    return mask > 0
+
+
 class DiskMaskArray:
     """Lazy disk-backed mask wrapper."""
 
@@ -94,7 +104,7 @@ class CacheStore:
         target_dir = self.mask_dir / namespace
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{self._safe_token(key)}.npy"
-        np.save(target, np.asarray(array, dtype=np.float32))
+        np.save(target, _cache_mask_array(array), allow_pickle=False)
         return str(target)
 
     def write_result(self, namespace: str, key: str, result: PredictionResult) -> PredictionResult:
@@ -103,7 +113,7 @@ class CacheStore:
         cached_objects: list[SegmentationObject] = []
         for obj in result.objects:
             mask_path = target_dir / f"object_{obj.object_index:03d}.npy"
-            np.save(mask_path, np.asarray(obj.mask, dtype=np.float32))
+            np.save(mask_path, _cache_mask_array(obj.mask), allow_pickle=False)
             cached_objects.append(
                 SegmentationObject(
                     mask=DiskMaskArray(mask_path),
@@ -117,7 +127,7 @@ class CacheStore:
         prompt_mask = None
         if result.prompt_mask is not None:
             prompt_mask_path = target_dir / "prompt_mask.npy"
-            np.save(prompt_mask_path, np.asarray(result.prompt_mask, dtype=np.float32))
+            np.save(prompt_mask_path, _cache_mask_array(result.prompt_mask), allow_pickle=False)
             prompt_mask = DiskMaskArray(prompt_mask_path)
         image = None
         if result.image is not None:
