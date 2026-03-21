@@ -23,6 +23,13 @@ Additional project credit details are listed in [CREDITS.md](CREDITS.md).
 - Cache-backed mask and result storage
 - Reusable loaded model instance across runs for lower overhead
 
+## Current Issues
+
+- Tool writes extremely large cache files for long runs.
+- 8k image produced 1gb per frame cache size.
+- Exemplar prompting not fully supported.
+- Video workflow not thoroughly tested.
+
 ## Project Layout
 
 - `sam3_ultralytics/backend.py`: high-level backend API
