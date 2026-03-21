@@ -1,0 +1,327 @@
+{
+  "source": "D:\\deepDataSystems\\02_projects\\02_nola\\02_scans\\01_jacksonSquare\\02_Qoocam\\test\\jacksonSquare_qoocam_00001.jpg",
+  "frame_index": null,
+  "mode": "image",
+  "image_size": [
+    3840,
+    7680
+  ],
+  "object_count": 23,
+  "objects": [
+    {
+      "index": 1,
+      "box": [
+        1717.236572265625,
+        2770.699462890625,
+        3700.193359375,
+        3726.408447265625
+      ],
+      "score": 0.9330494999885559,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 2,
+      "box": [
+        4564.4931640625,
+        2432.938232421875,
+        5223.26611328125,
+        3440.37890625
+      ],
+      "score": 0.9011016488075256,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 3,
+      "box": [
+        1044.3006591796875,
+        2099.2109375,
+        1176.5089111328125,
+        2557.82958984375
+      ],
+      "score": 0.8339927196502686,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 4,
+      "box": [
+        6343.955078125,
+        1986.248291015625,
+        6401.4775390625,
+        2116.397705078125
+      ],
+      "score": 0.7123193740844727,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 5,
+      "box": [
+        5361.599609375,
+        1952.475341796875,
+        5401.73828125,
+        2028.3968505859375
+      ],
+      "score": 0.6505746841430664,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 6,
+      "box": [
+        5530.0615234375,
+        1960.920166015625,
+        5572.77001953125,
+        2061.80029296875
+      ],
+      "score": 0.6283659338951111,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 7,
+      "box": [
+        5615.537109375,
+        1952.164794921875,
+        5651.28955078125,
+        2011.6502685546875
+      ],
+      "score": 0.45372849702835083,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 8,
+      "box": [
+        5423.64208984375,
+        1954.895751953125,
+        5453.3427734375,
+        1992.1422119140625
+      ],
+      "score": 0.3594488203525543,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 9,
+      "box": [
+        5413.978515625,
+        1955.3919677734375,
+        5439.37158203125,
+        1990.77392578125
+      ],
+      "score": 0.31626394391059875,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 10,
+      "box": [
+        5642.51318359375,
+        1952.5394287109375,
+        5673.6630859375,
+        2011.794677734375
+      ],
+      "score": 0.31275036931037903,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 11,
+      "box": [
+        5472.40869140625,
+        2021.9176025390625,
+        5507.0146484375,
+        2067.00048828125
+      ],
+      "score": 0.3087659180164337,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 12,
+      "box": [
+        5450.30419921875,
+        1956.3125,
+        5474.248046875,
+        1992.04931640625
+      ],
+      "score": 0.3006956875324249,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 13,
+      "box": [
+        5405.43896484375,
+        1954.6668701171875,
+        5428.91064453125,
+        1989.65234375
+      ],
+      "score": 0.2930671274662018,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 14,
+      "box": [
+        5461.5947265625,
+        1958.500732421875,
+        5483.32470703125,
+        1993.99560546875
+      ],
+      "score": 0.2799091935157776,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 15,
+      "box": [
+        6938.49755859375,
+        2013.399169921875,
+        7046.92138671875,
+        2150.03369140625
+      ],
+      "score": 0.27983084321022034,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 16,
+      "box": [
+        1450.4420166015625,
+        1910.9267578125,
+        1497.5013427734375,
+        2011.72021484375
+      ],
+      "score": 0.27704426646232605,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 17,
+      "box": [
+        5138.44384765625,
+        1934.160400390625,
+        5167.22705078125,
+        1989.3731689453125
+      ],
+      "score": 0.2737137973308563,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 18,
+      "box": [
+        5392.33251953125,
+        1955.03857421875,
+        5419.66015625,
+        1993.85009765625
+      ],
+      "score": 0.2723051905632019,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 19,
+      "box": [
+        5581.791015625,
+        1951.57421875,
+        5613.7314453125,
+        2009.70068359375
+      ],
+      "score": 0.2584061920642853,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 20,
+      "box": [
+        5088.806640625,
+        1945.668212890625,
+        5125.111328125,
+        2005.251220703125
+      ],
+      "score": 0.2542518377304077,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 21,
+      "box": [
+        5211.17822265625,
+        1947.70068359375,
+        5254.61181640625,
+        1997.9539794921875
+      ],
+      "score": 0.25392836332321167,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 22,
+      "box": [
+        5154.92529296875,
+        1935.4044189453125,
+        5183.92919921875,
+        1992.1827392578125
+      ],
+      "score": 0.2537471652030945,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    },
+    {
+      "index": 23,
+      "box": [
+        7208.35595703125,
+        1931.909912109375,
+        7251.720703125,
+        2035.862060546875
+      ],
+      "score": 0.2520478665828705,
+      "label": "person",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00001_merged_mask.png"
+    }
+  ],
+  "prompt_metadata": {
+    "texts": [
+      "person"
+    ],
+    "point_count": 0,
+    "box_count": 0,
+    "has_mask_input": false,
+    "mask_input": null,
+    "has_exemplar": false
+  },
+  "timings": {
+    "preprocess": 11.690999963320792,
+    "inference": 16995.27240009047,
+    "postprocess": 594.3326000124216,
+    "backend_total_ms": 26222.868900047615
+  }
+}

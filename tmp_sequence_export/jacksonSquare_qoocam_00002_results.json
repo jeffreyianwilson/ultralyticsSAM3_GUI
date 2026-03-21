@@ -1,0 +1,342 @@
+{
+  "source": "D:\\deepDataSystems\\02_projects\\02_nola\\02_scans\\01_jacksonSquare\\02_Qoocam\\test\\jacksonSquare_qoocam_00002.jpg",
+  "frame_index": null,
+  "mode": "image",
+  "image_size": [
+    3840,
+    7680
+  ],
+  "object_count": 23,
+  "objects": [
+    {
+      "index": 1,
+      "box": [
+        4475.0,
+        2438.0,
+        5199.0,
+        3437.0
+      ],
+      "score": 0.9137740135192871,
+      "label": "0",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 2,
+      "box": [
+        1727.0,
+        2769.0,
+        3677.0,
+        3726.0
+      ],
+      "score": 0.8783969283103943,
+      "label": "1",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 3,
+      "box": [
+        830.0,
+        2152.0,
+        1109.0,
+        2822.0
+      ],
+      "score": 0.7408581376075745,
+      "label": "2",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 4,
+      "box": [
+        5336.0,
+        1978.0,
+        5369.0,
+        2065.0
+      ],
+      "score": 0.5228785872459412,
+      "label": "3",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 5,
+      "box": [
+        6489.0,
+        2005.0,
+        6560.0,
+        2146.0
+      ],
+      "score": 0.6259933114051819,
+      "label": "4",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 6,
+      "box": [
+        5585.0,
+        1970.0,
+        5656.0,
+        2052.0
+      ],
+      "score": 0.4934220016002655,
+      "label": "5",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 7,
+      "box": [
+        6041.0,
+        2030.0,
+        6095.0,
+        2179.0
+      ],
+      "score": 0.5993472933769226,
+      "label": "6",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 8,
+      "box": [
+        6275.0,
+        2024.0,
+        6352.0,
+        2156.0
+      ],
+      "score": 0.6632933020591736,
+      "label": "7",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 9,
+      "box": [
+        6559.0,
+        1988.0,
+        6615.0,
+        2132.0
+      ],
+      "score": 0.5975426435470581,
+      "label": "8",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 10,
+      "box": [
+        5524.0,
+        1987.0,
+        5571.0,
+        2115.0
+      ],
+      "score": 0.618698000907898,
+      "label": "9",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 11,
+      "box": [
+        5528.0,
+        1986.0,
+        5574.0,
+        2091.0
+      ],
+      "score": 0.6101683378219604,
+      "label": "10",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 12,
+      "box": [
+        5065.0,
+        1949.0,
+        5140.0,
+        2035.0
+      ],
+      "score": 0.5161585807800293,
+      "label": "11",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 13,
+      "box": [
+        6281.0,
+        2018.0,
+        6355.0,
+        2139.0
+      ],
+      "score": 0.6207273006439209,
+      "label": "12",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 14,
+      "box": [
+        5117.0,
+        1992.0,
+        5179.0,
+        2067.0
+      ],
+      "score": 0.5534135103225708,
+      "label": "13",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 15,
+      "box": [
+        7130.0,
+        1919.0,
+        7211.0,
+        2069.0
+      ],
+      "score": 0.5308293700218201,
+      "label": "14",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 16,
+      "box": [
+        5370.0,
+        1971.0,
+        5446.0,
+        2023.0
+      ],
+      "score": 0.4688335955142975,
+      "label": "15",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 17,
+      "box": [
+        5520.0,
+        1980.0,
+        5566.0,
+        2093.0
+      ],
+      "score": 0.5968934297561646,
+      "label": "16",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 18,
+      "box": [
+        5065.0,
+        1988.0,
+        5144.0,
+        2063.0
+      ],
+      "score": 0.5447359085083008,
+      "label": "17",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 19,
+      "box": [
+        6296.0,
+        2015.0,
+        6373.0,
+        2122.0
+      ],
+      "score": 0.54608553647995,
+      "label": "18",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 20,
+      "box": [
+        5576.0,
+        1958.0,
+        5646.0,
+        2045.0
+      ],
+      "score": 0.4926777780056,
+      "label": "19",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 21,
+      "box": [
+        5125.0,
+        1983.0,
+        5207.0,
+        2064.0
+      ],
+      "score": 0.5385043621063232,
+      "label": "20",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 22,
+      "box": [
+        1239.0,
+        2092.0,
+        1310.0,
+        2351.0
+      ],
+      "score": 0.5931118130683899,
+      "label": "21",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    },
+    {
+      "index": 23,
+      "box": [
+        5640.0,
+        1969.0,
+        5679.0,
+        2051.0
+      ],
+      "score": 0.5017425417900085,
+      "label": "22",
+      "track_id": null,
+      "mask_path": "D:\\cache\\codex\\tmp_sequence_export\\jacksonSquare_qoocam_00002_merged_mask.png"
+    }
+  ],
+  "prompt_metadata": {
+    "texts": [
+      "person"
+    ],
+    "point_count": 0,
+    "box_count": 0,
+    "has_mask_input": true,
+    "mask_input": {
+      "source": "numpy_array",
+      "shape": [
+        3840,
+        7680
+      ],
+      "original_dtype": "float32",
+      "normalized_dtype": "float32",
+      "mask_count": 1,
+      "kind": "binary",
+      "min": 0.0,
+      "max": 1.0
+    },
+    "has_exemplar": false,
+    "compatibility_mode": "semantic_text_then_interactive_refine",
+    "semantic_seed_object_count": 23,
+    "refinement_box_count": 23
+  },
+  "timings": {
+    "preprocess": 5.174900055862963,
+    "inference": 12986.306500039063,
+    "postprocess": 1113.5920999804512,
+    "backend_total_ms": 33079.839000012726
+  }
+}
