@@ -10,6 +10,22 @@ from .schemas import PredictionResult
 
 
 @dataclass(slots=True)
+class ViewFilterState:
+    """Frame-scoped view filter state."""
+
+    frame_key: str | None = None
+    class_options: list[str] = field(default_factory=list)
+    id_options: list[int] = field(default_factory=list)
+    instance_options: list[tuple[str, str]] = field(default_factory=list)
+    selected_classes: set[str] = field(default_factory=set)
+    selected_ids: set[int] = field(default_factory=set)
+    selected_instances: set[str] = field(default_factory=set)
+    all_classes_selected: bool = True
+    all_ids_selected: bool = True
+    all_instances_selected: bool = True
+
+
+@dataclass(slots=True)
 class GUIState:
     """Mutable GUI state stored on the main window."""
 
@@ -39,6 +55,10 @@ class GUIState:
     boxes: list[tuple[float, float, float, float, int]] = field(default_factory=list)
     points_by_key: dict[str, list[tuple[float, float, int]]] = field(default_factory=dict)
     boxes_by_key: dict[str, list[tuple[float, float, float, float, int]]] = field(default_factory=dict)
+    suppressed_objects_by_key: dict[str, set[str]] = field(default_factory=dict)
+    suppressed_track_ids_by_source: dict[str, set[int]] = field(default_factory=dict)
+    view_filters: ViewFilterState = field(default_factory=ViewFilterState)
+    view_filters_by_frame: dict[str, ViewFilterState] = field(default_factory=dict)
     results: PredictionResult | list[PredictionResult | None] | None = None
     current_frame_index: int = 0
     playing: bool = False

@@ -21,6 +21,8 @@ This application was entirely written by AI, it is strongly recommended to revie
 - Text, point, box, and mask prompting for inference
 - Manual mask authoring as a separate non-inference layer
 - Image, folder, and video support
+- Per-frame timeline controls with frame jump input
+- Frame-scoped view filtering by class, ID, and instance
 - Overlay, JSON, and raw mask export
 - Cache-backed mask and result storage
 - Reusable loaded model instance across runs for lower overhead
@@ -29,7 +31,6 @@ This application was entirely written by AI, it is strongly recommended to revie
 
 - Exemplar prompting not fully supported.
 - Video workflow not thoroughly tested.
-
 ## Project Layout
 
 - `sam3_ultralytics/backend.py`: high-level backend API
@@ -157,11 +158,19 @@ Supported manual mask actions:
 - `Copy Mask`
 - `Paste To Current`
 - `Copy To All Frames`
+- `Copy Range` with `Prev` and `Next` frame counts
 - `Clear Manual Mask`
 
-### 5. Export
+### 5. View and Export
 
-Inside the `Export` rollout:
+Inside the `View/Export` rollout:
+
+- overlay opacity
+- label visibility
+- mask visibility
+- track ID visibility
+- class, ID, and instance filters
+- filtered export (exports only masks visible in the current view filters)
 
 - `Export Directory`
 - `Auto-export masks after inference`
@@ -169,17 +178,6 @@ Inside the `Export` rollout:
 - `Invert exported masks`
 - `Mask Dilation (px)`
 - `Export Masks`
-
-### 6. View Controls
-
-Inside the `View` rollout:
-
-- overlay opacity
-- label visibility
-- mask visibility
-- track ID visibility
-- class filter
-- ID filter
 
 ## Sequence and Video Behavior
 
@@ -193,6 +191,7 @@ Folder runs are processed one item at a time through the GUI:
 4. advance to the next image
 
 Folder runs are independent per-image inference. They do not use hidden tracking across the folder.
+Use the playback row to navigate with `Prev`, `Play`, `Next`, slider scrub, or direct frame jump by entering a frame number.
 
 ### Video Runs
 
@@ -343,6 +342,15 @@ C:\Users\jeffr\.conda\envs\ultralytics\python.exe -c "import torch; print(torch.
 Use `Clear Cache` in the GUI, or delete the configured cache directory manually.
 
 ## Changelog
+
+### 2026-03-27
+
+- Added playback frame jump input (`Frame #`) next to `Prev/Play/Next`; pressing Enter jumps to the requested frame.
+- Added manual mask range copy with explicit `Prev`/`Next` frame counts in the `Manual Masks` rollout.
+- Fixed append-inference folder/video runs so subsequent prompt-only append passes continue frame-by-frame and merge with existing masks without stalling on frame one.
+- Optimized append merging to avoid re-caching all prior frame masks on each append run.
+- Fixed compact cache overwrite invalidation so edited manual masks copied across ranges immediately reflect the newest mask content on target frames.
+- Finalized frame-scoped filter persistence and export behavior: mask export now always honors per-frame class/ID/instance filters in `View/Export`.
 
 ### 2026-03-21
 

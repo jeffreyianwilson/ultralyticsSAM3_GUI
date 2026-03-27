@@ -34,6 +34,11 @@ def clear_archive_runtime_cache() -> None:
     _ARCHIVE_RUNTIME_CACHE.clear()
 
 
+def _invalidate_archive_runtime_cache(path: str | Path) -> None:
+    """Drop a specific archive record so overwrite writes are visible immediately."""
+    _ARCHIVE_RUNTIME_CACHE.pop(str(path), None)
+
+
 def _read_json_array(value: np.ndarray) -> dict[str, Any]:
     raw = value.tolist()
     if isinstance(raw, bytes):
@@ -320,6 +325,7 @@ class CacheStore:
         return digest
 
     def _write_mask_archive(self, target: Path, array: np.ndarray) -> str:
+        _invalidate_archive_runtime_cache(target)
         masks = np.asarray(array)
         if masks.ndim == 2:
             mask_list = [masks]
@@ -342,9 +348,11 @@ class CacheStore:
             **_archive_payload("mask", mask_list),
         }
         np.savez_compressed(target, **payload)
+        _invalidate_archive_runtime_cache(target)
         return str(target)
 
     def _write_result_archive(self, target: Path, result: PredictionResult) -> PredictionResult:
+        _invalidate_archive_runtime_cache(target)
         object_masks = [np.asarray(obj.mask) for obj in result.objects]
         metadata = {
             "version": ARCHIVE_VERSION,
@@ -383,6 +391,7 @@ class CacheStore:
                 raise ValueError("Prompt masks must be 2D or NxHxW for compact caching.")
             payload.update(_archive_payload("prompt", prompt_list))
         np.savez_compressed(target, **payload)
+        _invalidate_archive_runtime_cache(target)
 
         cached_objects: list[SegmentationObject] = []
         for index, obj in enumerate(result.objects):

@@ -10,7 +10,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .backend import SAM3Ultralytics
 from .cache_store import CacheStore, load_cached_mask
-from .gui_state import GUIState
+from .gui_state import GUIState, ViewFilterState
 from .gui_widgets import PreviewCanvas
 from .gui_workers import BackendTask
 from .io_utils import list_image_directory, normalize_mask_input, preview_mask, read_video_frame, to_bgr_image, video_frame_count
@@ -25,6 +25,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("sam3_ultralytics")
         self.resize(1320, 860)
+        self._initial_maximize_pending = True
         self.state = GUIState()
         self.cache_store = CacheStore.create(Path.cwd() / ".sam3_cache")
         self.backend: SAM3Ultralytics | None = None
@@ -35,7 +36,12 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._streaming_batch_total = 0
         self._sequence_run_context: dict | None = None
         self._manual_mask_clipboard: np.ndarray | None = None
-        self.thread_pool = QtCore.QThreadPool.globalInstance()
+        # Use a dedicated single-thread pool so backend/model access does not
+        # hop across worker threads between sequence items.
+        self.thread_pool = QtCore.QThreadPool(self)
+        self.thread_pool.setMaxThreadCount(1)
+        self.thread_pool.setExpiryTimeout(-1)
+        self._run_cache_epoch = 0
         self.play_timer = QtCore.QTimer(self)
         self.play_timer.setInterval(180)
         self.play_timer.timeout.connect(self._advance_playback)
@@ -56,13 +62,28 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         root_layout.addWidget(splitter)
 
+        controls_scroll = QtWidgets.QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        controls_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        controls_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        controls_scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        controls_scroll.setMinimumWidth(340)
+        controls_scroll.setMaximumWidth(420)
+        splitter.addWidget(controls_scroll)
+        self.controls_scroll = controls_scroll
         controls = QtWidgets.QWidget()
-        controls.setMaximumWidth(420)
-        splitter.addWidget(controls)
+        self.controls_panel = controls
+        controls_scroll.setWidget(controls)
+        controls.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
         controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+        controls_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
+        controls_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
 
         form = QtWidgets.QFormLayout()
+        form.setVerticalSpacing(6)
         self.model_combo = QtWidgets.QComboBox()
         self.model_combo.setEditable(True)
         self.model_browse_button = QtWidgets.QPushButton("Browse")
@@ -98,10 +119,26 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         controls_layout.addLayout(source_row)
 
         toolbox = QtWidgets.QToolBox()
+        self.controls_toolbox = toolbox
+        toolbox.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed)
+        if toolbox.layout() is not None:
+            toolbox.layout().setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
         controls_layout.addWidget(toolbox)
 
         inference_page = QtWidgets.QWidget()
-        inference_layout = QtWidgets.QVBoxLayout(inference_page)
+        inference_page.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+        inference_root = QtWidgets.QVBoxLayout(inference_page)
+        inference_root.setContentsMargins(0, 0, 0, 0)
+        inference_root.setSpacing(0)
+        self.inference_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.inference_splitter.setChildrenCollapsible(False)
+        inference_root.addWidget(self.inference_splitter)
+        inference_content = QtWidgets.QWidget()
+        self.inference_splitter.addWidget(inference_content)
+        inference_layout = QtWidgets.QVBoxLayout(inference_content)
+        inference_layout.setContentsMargins(6, 6, 6, 6)
+        inference_layout.setSpacing(6)
+        inference_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
         inference_form = QtWidgets.QFormLayout()
         self.run_scope_combo = QtWidgets.QComboBox()
         self.run_scope_combo.addItem("Current Image / Frame", "current")
@@ -169,10 +206,27 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         inference_layout.addLayout(clear_row)
         self.prompt_summary_label = QtWidgets.QLabel("0 points, 0 boxes")
         inference_layout.addWidget(self.prompt_summary_label)
+        inference_spacer = QtWidgets.QWidget()
+        inference_spacer.setMinimumHeight(0)
+        self.inference_splitter.addWidget(inference_spacer)
+        self.inference_splitter.setStretchFactor(0, 1)
+        self.inference_splitter.setStretchFactor(1, 0)
         toolbox.addItem(inference_page, "Inference")
 
         manual_page = QtWidgets.QWidget()
-        manual_layout = QtWidgets.QVBoxLayout(manual_page)
+        manual_page.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+        manual_root = QtWidgets.QVBoxLayout(manual_page)
+        manual_root.setContentsMargins(0, 0, 0, 0)
+        manual_root.setSpacing(0)
+        self.manual_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.manual_splitter.setChildrenCollapsible(False)
+        manual_root.addWidget(self.manual_splitter)
+        manual_content = QtWidgets.QWidget()
+        self.manual_splitter.addWidget(manual_content)
+        manual_layout = QtWidgets.QVBoxLayout(manual_content)
+        manual_layout.setContentsMargins(6, 6, 6, 6)
+        manual_layout.setSpacing(6)
+        manual_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
         self.manual_mask_tool_button = QtWidgets.QToolButton()
         self.manual_mask_tool_button.setText("Manual Mask Tool")
         self.manual_mask_tool_button.setCheckable(True)
@@ -202,34 +256,44 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         manual_button_row.addWidget(self.copy_manual_mask_all_button, 1, 0)
         manual_button_row.addWidget(self.clear_manual_mask_button, 1, 1)
         manual_layout.addLayout(manual_button_row)
+        manual_range_row = QtWidgets.QHBoxLayout()
+        self.copy_manual_prev_spin = QtWidgets.QSpinBox()
+        self.copy_manual_prev_spin.setRange(0, 100000)
+        self.copy_manual_prev_spin.setValue(0)
+        self.copy_manual_next_spin = QtWidgets.QSpinBox()
+        self.copy_manual_next_spin.setRange(0, 100000)
+        self.copy_manual_next_spin.setValue(0)
+        self.copy_manual_range_button = QtWidgets.QPushButton("Copy Range")
+        manual_range_row.addWidget(QtWidgets.QLabel("Prev"))
+        manual_range_row.addWidget(self.copy_manual_prev_spin)
+        manual_range_row.addWidget(QtWidgets.QLabel("Next"))
+        manual_range_row.addWidget(self.copy_manual_next_spin)
+        manual_range_row.addWidget(self.copy_manual_range_button)
+        manual_layout.addLayout(manual_range_row)
+        manual_spacer = QtWidgets.QWidget()
+        manual_spacer.setMinimumHeight(0)
+        self.manual_splitter.addWidget(manual_spacer)
+        self.manual_splitter.setStretchFactor(0, 1)
+        self.manual_splitter.setStretchFactor(1, 0)
         toolbox.addItem(manual_page, "Manual Masks")
 
-        export_page = QtWidgets.QWidget()
-        export_layout = QtWidgets.QVBoxLayout(export_page)
-        export_dir_row = QtWidgets.QHBoxLayout()
-        self.export_dir_edit = QtWidgets.QLineEdit()
-        self.export_dir_browse_button = QtWidgets.QPushButton("Browse")
-        export_dir_row.addWidget(self.export_dir_edit)
-        export_dir_row.addWidget(self.export_dir_browse_button)
-        export_layout.addWidget(QtWidgets.QLabel("Export Directory"))
-        export_layout.addLayout(export_dir_row)
-        self.auto_export_masks_checkbox = QtWidgets.QCheckBox("Auto-export masks after inference")
-        self.merge_masks_only_checkbox = QtWidgets.QCheckBox("Export merged masks only")
-        self.invert_mask_export_checkbox = QtWidgets.QCheckBox("Invert exported masks")
-        self.export_dilation_spin = QtWidgets.QSpinBox()
-        self.export_dilation_spin.setRange(0, 256)
-        self.export_dilation_spin.setValue(0)
-        self.export_masks_button = QtWidgets.QPushButton("Export Masks")
-        export_layout.addWidget(self.auto_export_masks_checkbox)
-        export_layout.addWidget(self.merge_masks_only_checkbox)
-        export_layout.addWidget(self.invert_mask_export_checkbox)
-        export_layout.addWidget(QtWidgets.QLabel("Mask Dilation (px)"))
-        export_layout.addWidget(self.export_dilation_spin)
-        export_layout.addWidget(self.export_masks_button)
-        toolbox.addItem(export_page, "Export")
-
         view_page = QtWidgets.QWidget()
-        view_layout = QtWidgets.QFormLayout(view_page)
+        view_page.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+        view_root = QtWidgets.QVBoxLayout(view_page)
+        view_root.setContentsMargins(0, 0, 0, 0)
+        view_root.setSpacing(0)
+        self.view_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.view_splitter.setChildrenCollapsible(False)
+        view_root.addWidget(self.view_splitter)
+        view_content = QtWidgets.QWidget()
+        self.view_splitter.addWidget(view_content)
+        view_layout = QtWidgets.QVBoxLayout(view_content)
+        view_layout.setContentsMargins(6, 6, 6, 6)
+        view_layout.setSpacing(6)
+        view_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
+        view_form = QtWidgets.QFormLayout()
+        view_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        view_form.setVerticalSpacing(6)
         self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(0, 100)
         self.show_labels_checkbox = QtWidgets.QCheckBox("Labels")
@@ -238,17 +302,117 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.show_masks_checkbox.setChecked(True)
         self.show_track_ids_checkbox = QtWidgets.QCheckBox("Track IDs")
         self.show_track_ids_checkbox.setChecked(True)
-        self.filter_class_combo = QtWidgets.QComboBox()
-        self.filter_id_combo = QtWidgets.QComboBox()
-        self.filter_class_combo.addItem("All classes", None)
-        self.filter_id_combo.addItem("All IDs", None)
-        view_layout.addRow("Overlay Opacity", self.opacity_slider)
-        view_layout.addRow(self.show_labels_checkbox)
-        view_layout.addRow(self.show_masks_checkbox)
-        view_layout.addRow(self.show_track_ids_checkbox)
-        view_layout.addRow("Filter Class", self.filter_class_combo)
-        view_layout.addRow("Filter ID", self.filter_id_combo)
-        toolbox.addItem(view_page, "View")
+        view_form.addRow("Overlay Opacity", self.opacity_slider)
+        view_form.addRow(self.show_labels_checkbox)
+        view_form.addRow(self.show_masks_checkbox)
+        view_form.addRow(self.show_track_ids_checkbox)
+        view_layout.addLayout(view_form)
+        self.filter_class_list = QtWidgets.QListWidget()
+        self.filter_id_list = QtWidgets.QListWidget()
+        self.filter_instance_list = QtWidgets.QListWidget()
+        for widget in [self.filter_class_list, self.filter_id_list, self.filter_instance_list]:
+            widget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+            widget.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            widget.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            widget.setUniformItemSizes(True)
+            widget.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.filter_class_button = QtWidgets.QToolButton()
+        self.filter_class_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.filter_class_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.filter_class_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.filter_id_button = QtWidgets.QToolButton()
+        self.filter_id_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.filter_id_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.filter_id_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.filter_instance_button = QtWidgets.QToolButton()
+        self.filter_instance_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.filter_instance_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.filter_instance_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        filter_button_style = (
+            "QToolButton {"
+            " text-align: left;"
+            " padding-left: 6px;"
+            " padding-right: 20px;"
+            " min-height: 24px;"
+            " border: 1px solid #5f5f5f;"
+            " border-radius: 4px;"
+            " background-color: #343434;"
+            "}"
+            "QToolButton:hover {"
+            " border-color: #8a8a8a;"
+            "}"
+            "QToolButton:pressed {"
+            " background-color: #3d3d3d;"
+            "}"
+            "QToolButton::menu-indicator {"
+            " subcontrol-origin: padding;"
+            " subcontrol-position: right center;"
+            " right: 6px;"
+            "}"
+        )
+        self.filter_class_button.setStyleSheet(filter_button_style)
+        self.filter_id_button.setStyleSheet(filter_button_style)
+        self.filter_instance_button.setStyleSheet(filter_button_style)
+        self.filter_class_menu = QtWidgets.QMenu(self)
+        self.filter_id_menu = QtWidgets.QMenu(self)
+        self.filter_instance_menu = QtWidgets.QMenu(self)
+        self._attach_filter_menu(self.filter_class_button, self.filter_class_menu, self.filter_class_list)
+        self._attach_filter_menu(self.filter_id_button, self.filter_id_menu, self.filter_id_list)
+        self._attach_filter_menu(self.filter_instance_button, self.filter_instance_menu, self.filter_instance_list)
+        view_layout.addWidget(QtWidgets.QLabel("Filter Class"))
+        view_layout.addWidget(self.filter_class_button)
+        view_layout.addWidget(QtWidgets.QLabel("Filter ID"))
+        view_layout.addWidget(self.filter_id_button)
+        view_layout.addWidget(QtWidgets.QLabel("Filter Instance"))
+        view_layout.addWidget(self.filter_instance_button)
+        export_separator = QtWidgets.QFrame()
+        export_separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        export_separator.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+        view_layout.addWidget(export_separator)
+
+        export_dir_row = QtWidgets.QHBoxLayout()
+        self.export_dir_edit = QtWidgets.QLineEdit()
+        self.export_dir_browse_button = QtWidgets.QPushButton("Browse")
+        export_dir_row.addWidget(self.export_dir_edit)
+        export_dir_row.addWidget(self.export_dir_browse_button)
+        view_layout.addWidget(QtWidgets.QLabel("Export Directory"))
+        view_layout.addLayout(export_dir_row)
+        self.auto_export_masks_checkbox = QtWidgets.QCheckBox("Auto-export masks after inference")
+        self.merge_masks_only_checkbox = QtWidgets.QCheckBox("Export merged masks only")
+        self.invert_mask_export_checkbox = QtWidgets.QCheckBox("Invert exported masks")
+        self.export_filtered_view_checkbox = QtWidgets.QCheckBox("Export only masks visible in View")
+        self.export_filtered_view_checkbox.setChecked(True)
+        self.export_filtered_view_checkbox.setEnabled(False)
+        self.export_dilation_spin = QtWidgets.QSpinBox()
+        self.export_dilation_spin.setRange(0, 256)
+        self.export_dilation_spin.setValue(0)
+        self.export_masks_button = QtWidgets.QPushButton("Export Masks")
+        view_layout.addWidget(self.auto_export_masks_checkbox)
+        view_layout.addWidget(self.merge_masks_only_checkbox)
+        view_layout.addWidget(self.invert_mask_export_checkbox)
+        view_layout.addWidget(self.export_filtered_view_checkbox)
+        view_layout.addWidget(QtWidgets.QLabel("Mask Dilation (px)"))
+        view_layout.addWidget(self.export_dilation_spin)
+        view_layout.addWidget(self.export_masks_button)
+        view_spacer = QtWidgets.QWidget()
+        view_spacer.setMinimumHeight(0)
+        self.view_splitter.addWidget(view_spacer)
+        self.view_splitter.setStretchFactor(0, 1)
+        self.view_splitter.setStretchFactor(1, 0)
+        toolbox.addItem(view_page, "View/Export")
+
+        metadata_page = QtWidgets.QWidget()
+        metadata_page.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+        metadata_layout = QtWidgets.QVBoxLayout(metadata_page)
+        metadata_layout.setContentsMargins(6, 6, 6, 6)
+        metadata_layout.setSpacing(6)
+        metadata_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
+        self.metadata_panel = QtWidgets.QPlainTextEdit()
+        self.metadata_panel.setReadOnly(True)
+        self.metadata_panel.setMaximumHeight(120)
+        metadata_layout.addWidget(self.metadata_panel)
+        toolbox.addItem(metadata_page, "Metadata")
 
         action_row = QtWidgets.QHBoxLayout()
         self.run_button = QtWidgets.QPushButton("Run")
@@ -259,10 +423,10 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         action_row.addWidget(self.clear_masks_button)
         action_row.addWidget(self.cancel_button)
         controls_layout.addLayout(action_row)
-        controls_layout.addStretch(1)
 
         right = QtWidgets.QWidget()
         splitter.addWidget(right)
+        splitter.setCollapsible(0, False)
         splitter.setStretchFactor(1, 1)
         right_layout = QtWidgets.QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -277,12 +441,18 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.play_button.setEnabled(False)
         self.step_forward_button = QtWidgets.QPushButton("Next")
         self.step_forward_button.setEnabled(False)
+        self.frame_jump_edit = QtWidgets.QLineEdit()
+        self.frame_jump_edit.setPlaceholderText("Frame #")
+        self.frame_jump_edit.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.frame_jump_edit.setFixedWidth(84)
+        self.frame_jump_edit.setEnabled(False)
         self.seek_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.seek_slider.setEnabled(False)
         self.frame_label = QtWidgets.QLabel("Frame 0/0")
         playback_row.addWidget(self.step_back_button)
         playback_row.addWidget(self.play_button)
         playback_row.addWidget(self.step_forward_button)
+        playback_row.addWidget(self.frame_jump_edit)
         playback_row.addWidget(self.seek_slider, stretch=1)
         playback_row.addWidget(self.frame_label)
         right_layout.addLayout(playback_row)
@@ -293,10 +463,6 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.progress_bar.setFormat("Idle")
         right_layout.addWidget(self.progress_bar)
 
-        self.result_summary_label = QtWidgets.QLabel("No inference results yet.")
-        self.result_summary_label.setWordWrap(True)
-        right_layout.addWidget(self.result_summary_label)
-
         self.result_panel = QtWidgets.QPlainTextEdit()
         self.result_panel.setReadOnly(True)
         self.result_panel.setMaximumBlockCount(500)
@@ -305,7 +471,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
 
         QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+X"), self, activated=self._clear_all)
 
-        self.statusBar().showMessage("Ready")
+        self.statusBar().hide()
+        splitter.setSizes([380, 1200])
 
         self.model_browse_button.clicked.connect(self._browse_model)
         self.cache_browse_button.clicked.connect(self._browse_cache_dir)
@@ -333,6 +500,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.play_button.clicked.connect(self._toggle_playback)
         self.step_forward_button.clicked.connect(lambda: self._step_sequence(1))
         self.seek_slider.valueChanged.connect(self._display_current_result)
+        self.frame_jump_edit.returnPressed.connect(self._jump_to_frame)
 
         self.point_tool_button.toggled.connect(lambda checked: self._set_tool("point" if checked else "none"))
         self.box_tool_button.toggled.connect(lambda checked: self._set_tool("box" if checked else "none"))
@@ -341,6 +509,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.copy_manual_mask_button.clicked.connect(self._copy_manual_mask_to_clipboard)
         self.paste_manual_mask_button.clicked.connect(self._paste_manual_mask_to_current_frame)
         self.copy_manual_mask_all_button.clicked.connect(self._copy_manual_mask_to_all_frames)
+        self.copy_manual_range_button.clicked.connect(self._copy_manual_mask_to_range)
         self.clear_manual_mask_button.clicked.connect(self._clear_current_manual_mask)
         for widget in [
             self.opacity_slider,
@@ -350,8 +519,11 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         ]:
             signal = widget.valueChanged if isinstance(widget, QtWidgets.QSlider) else widget.toggled
             signal.connect(self._refresh_preview)
-        self.filter_class_combo.currentIndexChanged.connect(self._refresh_preview)
-        self.filter_id_combo.currentIndexChanged.connect(self._refresh_preview)
+        self.filter_class_list.itemChanged.connect(self._handle_class_filter_change)
+        self.filter_id_list.itemChanged.connect(self._handle_id_filter_change)
+        self.filter_instance_list.itemChanged.connect(self._handle_instance_filter_change)
+        toolbox.currentChanged.connect(lambda _index: self._update_left_panel_layout())
+        splitter.splitterMoved.connect(lambda _pos, _index: self._update_left_panel_layout())
 
     def _apply_defaults(self) -> None:
         self.model_combo.addItem(r"D:\cache\models\sam3.pt")
@@ -367,81 +539,708 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._set_brush_size(self.brush_slider.value())
         self._refresh_view_filters()
         self._reset_progress()
+        self._set_result_summary("No inference results yet.")
+        QtCore.QTimer.singleShot(0, self._update_left_panel_layout)
 
     def _set_result_summary(self, text: str) -> None:
-        self.result_summary_label.setText(text)
+        self.metadata_panel.setPlainText(text)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        if self._initial_maximize_pending:
+            self._initial_maximize_pending = False
+            self.showMaximized()
+        QtCore.QTimer.singleShot(0, self._update_left_panel_layout)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_left_panel_layout()
 
     def _iter_result_objects(self):
-        results = self.state.results
-        if results is None:
+        result = self._current_result()
+        if result is None or not self._result_matches_current_view(result):
             return []
-        items = results if isinstance(results, list) else [results]
-        objects = []
-        for result in items:
-            if result is None:
+        return self._result_objects(result, apply_filters=False, include_suppressed=False)
+
+    def _result_source_scope(self, result: PredictionResult) -> str:
+        if result.mode == "video":
+            return str(result.source or self.state.source_path or "")
+        return str(result.source or self.state.source_path or "")
+
+    def _result_frame_key(self, result: PredictionResult) -> str:
+        if result.mode == "video":
+            return f"{self._result_source_scope(result)}::frame:{int(result.frame_index or 0)}"
+        return str(result.source or self._current_source_key() or self.state.source_path or "")
+
+    @staticmethod
+    def _object_sort_key(obj: SegmentationObject) -> tuple[float, float, float, int]:
+        if obj.box is not None:
+            x1, y1, x2, y2 = obj.box
+            center_x = (x1 + x2) * 0.5
+            center_y = (y1 + y2) * 0.5
+            area = max(0.0, (x2 - x1) * (y2 - y1))
+            return (center_x, center_y, area, obj.object_index)
+        mask = np.asarray(obj.mask)
+        ys, xs = np.where(mask > 0)
+        if ys.size:
+            return (float(xs.mean()), float(ys.mean()), float(mask.sum()), obj.object_index)
+        return (0.0, 0.0, 0.0, obj.object_index)
+
+    @staticmethod
+    def _is_numeric_label(label: str | None) -> bool:
+        if label is None:
+            return False
+        text = str(label).strip()
+        return bool(text) and text.isdigit()
+
+    @staticmethod
+    def _prompt_text_labels(result: PredictionResult) -> list[str]:
+        raw = result.prompt_metadata.get("texts") if isinstance(result.prompt_metadata, dict) else None
+        if isinstance(raw, str):
+            values = [part.strip() for part in raw.split(",") if part.strip()]
+            return values
+        if isinstance(raw, (list, tuple)):
+            values: list[str] = []
+            for item in raw:
+                text = str(item).strip()
+                if text:
+                    values.append(text)
+            return values
+        return []
+
+    def _display_label_for_object(self, result: PredictionResult, obj: SegmentationObject) -> str:
+        raw_label = str(obj.label).strip() if obj.label is not None else ""
+        if raw_label and not self._is_numeric_label(raw_label):
+            return raw_label
+        prompt_labels = self._prompt_text_labels(result)
+        if prompt_labels:
+            if raw_label.isdigit():
+                numeric_index = int(raw_label)
+                if 0 <= numeric_index < len(prompt_labels):
+                    return prompt_labels[numeric_index]
+            if len(prompt_labels) == 1:
+                return prompt_labels[0]
+        return "Unlabeled"
+
+    def _manual_instance_key(self, frame_key: str | None = None) -> str:
+        resolved = frame_key or self._current_source_key() or "frame"
+        return f"{resolved}|manualMask|0"
+
+    def _object_instance_key(self, result: PredictionResult, obj: SegmentationObject) -> str:
+        box = obj.box or (0.0, 0.0, 0.0, 0.0)
+        rounded_box = tuple(int(round(value)) for value in box)
+        label = self._display_label_for_object(result, obj)
+        return f"{self._result_frame_key(result)}|{obj.object_index}|{obj.track_id}|{label}|{rounded_box}"
+
+    def _object_track_scope_key(self, result: PredictionResult, track_id: int) -> str:
+        return f"{self._result_source_scope(result)}|{int(track_id)}"
+
+    def _suppressed_instance_keys(self, result: PredictionResult) -> set[str]:
+        return self.state.suppressed_objects_by_key.get(self._result_frame_key(result), set())
+
+    def _suppressed_track_ids(self, result: PredictionResult) -> set[int]:
+        return self.state.suppressed_track_ids_by_source.get(self._result_source_scope(result), set())
+
+    def _is_object_suppressed(self, result: PredictionResult, obj: SegmentationObject) -> bool:
+        if self._object_instance_key(result, obj) in self._suppressed_instance_keys(result):
+            return True
+        return obj.track_id is not None and int(obj.track_id) in self._suppressed_track_ids(result)
+
+    def _filter_state(self) -> ViewFilterState:
+        return self.state.view_filters
+
+    @staticmethod
+    def _effective_selection(options: list[object], selected: set[object], all_selected: bool) -> set[object] | None:
+        if not options:
+            return None
+        if all_selected:
+            return None
+        return set(selected)
+
+    @staticmethod
+    def _set_checkable_items(
+        widget: QtWidgets.QListWidget,
+        entries: list[tuple[str, object]],
+        selected_values: set[object],
+        *,
+        all_label: str,
+        all_selected: bool,
+    ) -> None:
+        widget.blockSignals(True)
+        widget.clear()
+        all_item = QtWidgets.QListWidgetItem(all_label)
+        all_item.setFlags(all_item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable | QtCore.Qt.ItemFlag.ItemIsEnabled)
+        all_item.setData(QtCore.Qt.ItemDataRole.UserRole, None)
+        all_item.setCheckState(QtCore.Qt.CheckState.Checked if all_selected else QtCore.Qt.CheckState.Unchecked)
+        widget.addItem(all_item)
+        for label, value in entries:
+            item = QtWidgets.QListWidgetItem(label)
+            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable | QtCore.Qt.ItemFlag.ItemIsEnabled)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, value)
+            checked = all_selected or value in selected_values
+            item.setCheckState(QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked)
+            widget.addItem(item)
+        widget.blockSignals(False)
+
+    @staticmethod
+    def _sync_selection_with_options(
+        options: list[object],
+        selected: set[object],
+        *,
+        all_selected: bool,
+    ) -> tuple[set[object], bool]:
+        option_values = set(options)
+        if not options:
+            return set(), True
+        if all_selected:
+            return set(option_values), True
+        filtered = set(selected) & option_values
+        if len(filtered) == len(option_values):
+            return set(option_values), True
+        return filtered, False
+
+    @staticmethod
+    def _apply_toggle_to_selection(
+        options: list[object],
+        selected: set[object],
+        all_selected: bool,
+        *,
+        changed_value: object,
+        checked: bool,
+    ) -> tuple[set[object], bool]:
+        option_values = set(options)
+        if changed_value is None:
+            if checked:
+                return set(option_values), True
+            return set(), False
+        updated = set(option_values) if all_selected else set(selected)
+        if checked:
+            updated.add(changed_value)
+        else:
+            updated.discard(changed_value)
+        updated &= option_values
+        if len(updated) == len(option_values):
+            return set(option_values), True
+        return updated, False
+
+    def _current_frame_result(self) -> PredictionResult | None:
+        result = self._current_result()
+        if result is None or not self._result_matches_current_view(result):
+            return None
+        return result
+
+    def _current_frame_objects(self, *, include_suppressed: bool = False) -> list[SegmentationObject]:
+        result = self._current_frame_result()
+        if result is None:
+            return []
+        objects: list[SegmentationObject] = []
+        for obj in result.objects:
+            if not include_suppressed and self._is_object_suppressed(result, obj):
                 continue
-            objects.extend(result.objects)
+            objects.append(obj)
         return objects
 
+    def _manual_mask_present_for_current_frame(self) -> bool:
+        key = self._current_source_key()
+        if self.state.manual_mask_input is not None:
+            return True
+        if key is None:
+            return False
+        return key in self.state.manual_masks_by_key
+
+    def _attach_filter_menu(
+        self,
+        button: QtWidgets.QToolButton,
+        menu: QtWidgets.QMenu,
+        widget: QtWidgets.QListWidget,
+    ) -> None:
+        container = QtWidgets.QWidget(menu)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(0)
+        layout.addWidget(widget)
+        container.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        widget_action = QtWidgets.QWidgetAction(menu)
+        widget_action.setDefaultWidget(container)
+        menu.addAction(widget_action)
+        widget.setProperty("owner_button", button)
+        button.setMenu(menu)
+
+    def _resize_filter_list(self, widget: QtWidgets.QListWidget) -> None:
+        row_height = widget.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = widget.fontMetrics().height() + 8
+        frame = widget.frameWidth() * 2
+        item_count = max(widget.count(), 1)
+        visible_count = min(item_count, 10)
+        height = frame + (row_height * visible_count)
+        owner_button = widget.property("owner_button")
+        button_width = owner_button.width() if isinstance(owner_button, QtWidgets.QAbstractButton) else 220
+        width = max(button_width, 220)
+        widget.setFixedHeight(height)
+        widget.setFixedWidth(width)
+        parent_widget = widget.parentWidget()
+        if parent_widget is not None:
+            parent_widget.setFixedWidth(width + 12)
+            parent_widget.setFixedHeight(height + 12)
+        if isinstance(owner_button, QtWidgets.QAbstractButton) and owner_button.menu() is not None:
+            owner_button.menu().setFixedSize(width + 12, height + 12)
+
+    @staticmethod
+    def _button_text_for_values(
+        default_label: str,
+        selected_values: set[object] | None,
+        formatter,
+    ) -> str:
+        if selected_values is None:
+            return default_label
+        if len(selected_values) == 0:
+            return "None"
+        labels = [formatter(value) for value in selected_values]
+        if not labels:
+            return default_label
+        if len(labels) <= 2:
+            return ", ".join(labels)
+        return f"{len(labels)} selected"
+
+    @staticmethod
+    def _set_toolbutton_elided_text(button: QtWidgets.QToolButton, text: str) -> None:
+        button.setText(text)
+
+    def _update_left_panel_layout(self) -> None:
+        if not hasattr(self, "controls_panel"):
+            return
+        current = self.controls_toolbox.currentWidget() if hasattr(self, "controls_toolbox") else None
+        if current is not None:
+            current.adjustSize()
+        tab_buttons = self.controls_toolbox.findChildren(QtWidgets.QAbstractButton, "qt_toolbox_toolboxbutton")
+        tabs_height = sum(button.sizeHint().height() for button in tab_buttons)
+        page_height = 0
+        if current is not None:
+            page_height = max(current.sizeHint().height(), current.minimumSizeHint().height())
+            if current.layout() is not None:
+                page_height = max(page_height, current.layout().sizeHint().height())
+        frame = self.controls_toolbox.frameWidth() * 2
+        other_height = 0
+        layout = self.controls_panel.layout()
+        if layout is not None:
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                widget = item.widget()
+                child_layout = item.layout()
+                if widget is self.controls_toolbox:
+                    continue
+                if widget is not None:
+                    other_height += widget.sizeHint().height()
+                elif child_layout is not None:
+                    other_height += child_layout.sizeHint().height()
+            spacing_count = max(layout.count() - 1, 0)
+            other_height += layout.spacing() * spacing_count
+            other_height += layout.contentsMargins().top() + layout.contentsMargins().bottom()
+        available_height = max(self.controls_scroll.viewport().height() - other_height, tabs_height + 80)
+        self.controls_toolbox.setFixedHeight(min(tabs_height + page_height + frame + 4, available_height))
+        self.controls_toolbox.updateGeometry()
+        if layout is not None:
+            self.controls_panel.setFixedHeight(layout.sizeHint().height())
+        self.controls_panel.adjustSize()
+        self.controls_scroll.widget().updateGeometry()
+        self._refresh_filter_button_labels()
+
+    def _refresh_filter_button_labels(self) -> None:
+        filters = self._filter_state()
+        active_class_values = self._effective_selection(filters.class_options, filters.selected_classes, filters.all_classes_selected)
+        active_id_values = self._effective_selection(filters.id_options, filters.selected_ids, filters.all_ids_selected)
+        active_instance_values = self._effective_selection(
+            [key for _label, key in filters.instance_options],
+            filters.selected_instances,
+            filters.all_instances_selected,
+        )
+        instance_labels_by_key = {key: label for label, key in filters.instance_options}
+        self._set_toolbutton_elided_text(
+            self.filter_class_button,
+            self._button_text_for_values("All classes", active_class_values, lambda value: str(value)),
+        )
+        self._set_toolbutton_elided_text(
+            self.filter_id_button,
+            self._button_text_for_values("All IDs", active_id_values, lambda value: str(int(value))),
+        )
+        self._set_toolbutton_elided_text(
+            self.filter_instance_button,
+            self._button_text_for_values(
+                "All instances",
+                active_instance_values,
+                lambda value: instance_labels_by_key.get(str(value), str(value)),
+            ),
+        )
+
+    def _selected_view_instance_keys(self) -> set[str] | None:
+        filters = self._filter_state()
+        values = self._effective_selection(
+            [key for _label, key in filters.instance_options],
+            filters.selected_instances,
+            filters.all_instances_selected,
+        )
+        if values is None:
+            return None
+        return {str(value) for value in values}
+
+    def _result_objects(
+        self,
+        result: PredictionResult | None,
+        *,
+        apply_filters: bool,
+        include_suppressed: bool,
+        filter_state: ViewFilterState | None = None,
+    ) -> list[SegmentationObject]:
+        if result is None:
+            return []
+        objects: list[SegmentationObject] = []
+        if apply_filters:
+            if filter_state is None:
+                visible_track_ids = self._selected_view_track_ids()
+                visible_labels = self._selected_view_labels()
+                visible_instance_keys = self._selected_view_instance_keys()
+            else:
+                visible_track_ids = self._effective_selection(
+                    filter_state.id_options,
+                    filter_state.selected_ids,
+                    filter_state.all_ids_selected,
+                )
+                if visible_track_ids is not None:
+                    visible_track_ids = {int(value) for value in visible_track_ids}
+                visible_labels = self._effective_selection(
+                    filter_state.class_options,
+                    filter_state.selected_classes,
+                    filter_state.all_classes_selected,
+                )
+                if visible_labels is not None:
+                    visible_labels = {str(value) for value in visible_labels}
+                visible_instance_keys = self._effective_selection(
+                    [key for _label, key in filter_state.instance_options],
+                    filter_state.selected_instances,
+                    filter_state.all_instances_selected,
+                )
+                if visible_instance_keys is not None:
+                    visible_instance_keys = {str(value) for value in visible_instance_keys}
+        else:
+            visible_track_ids = None
+            visible_labels = None
+            visible_instance_keys = None
+        for obj in result.objects:
+            if not include_suppressed and self._is_object_suppressed(result, obj):
+                continue
+            if visible_track_ids is not None and obj.track_id not in visible_track_ids:
+                continue
+            if visible_labels is not None and self._display_label_for_object(result, obj) not in visible_labels:
+                continue
+            if visible_instance_keys is not None and self._object_instance_key(result, obj) not in visible_instance_keys:
+                continue
+            objects.append(obj)
+        return objects
+
+    def _instance_filter_candidates(self, result: PredictionResult | None) -> list[tuple[str, str]]:
+        selected_track_ids = self._selected_view_track_ids()
+        selected_labels = self._selected_view_labels()
+        label_counts: dict[str, int] = {}
+        items: list[tuple[str, str]] = []
+        if result is not None:
+            candidates = self._result_objects(result, apply_filters=False, include_suppressed=False)
+            if selected_track_ids is not None:
+                candidates = [obj for obj in candidates if obj.track_id in selected_track_ids]
+            if selected_labels is not None:
+                candidates = [obj for obj in candidates if self._display_label_for_object(result, obj) in selected_labels]
+            candidates = sorted(candidates, key=self._object_sort_key)
+            for obj in candidates:
+                key = self._object_instance_key(result, obj)
+                label = self._display_label_for_object(result, obj)
+                label_counts[label] = label_counts.get(label, 0) + 1
+                parts = [f"{label} #{label_counts[label]}"]
+                if obj.track_id is not None:
+                    parts.append(f"id={obj.track_id}")
+                if obj.score is not None:
+                    parts.append(f"{obj.score:.2f}")
+                items.append((" | ".join(parts), key))
+        if self._manual_mask_present_for_current_frame():
+            manual_key = self._manual_instance_key(self._result_frame_key(result) if result is not None else self._current_source_key())
+            include_manual = True
+            if selected_track_ids is not None and 0 not in selected_track_ids:
+                include_manual = False
+            if selected_labels is not None and "manualMask" not in selected_labels:
+                include_manual = False
+            if include_manual:
+                items.append(("manualMask #1 | id=0", manual_key))
+        return items
+
+    def _filtered_result_copy(self, result: PredictionResult, *, apply_view_filters: bool) -> PredictionResult:
+        filter_state = None
+        if apply_view_filters:
+            frame_key = self._result_frame_key(result)
+            filter_state = self.state.view_filters_by_frame.get(frame_key)
+        objects = self._result_objects(
+            result,
+            apply_filters=apply_view_filters,
+            include_suppressed=False,
+            filter_state=filter_state,
+        )
+        return PredictionResult(
+            source=result.source,
+            frame_index=result.frame_index,
+            mode=result.mode,
+            image_size=result.image_size,
+            inference_image_size=result.inference_image_size,
+            objects=list(objects),
+            prompt_metadata=dict(result.prompt_metadata),
+            tracking_metadata=dict(result.tracking_metadata),
+            timings=dict(result.timings),
+            image=result.image,
+            prompt_mask=result.prompt_mask,
+        )
+
+    def _results_for_export(self, *, apply_view_filters: bool):
+        results = self.state.results
+        if isinstance(results, list):
+            return [None if item is None else self._filtered_result_copy(item, apply_view_filters=apply_view_filters) for item in results]
+        if isinstance(results, PredictionResult):
+            return self._filtered_result_copy(results, apply_view_filters=apply_view_filters)
+        return results
+
+    def _manual_masks_for_export(self, *, apply_view_filters: bool) -> dict[str, object] | None:
+        mapping = self.state.manual_masks_by_key or None
+        if mapping is None:
+            return None
+        if not apply_view_filters:
+            return mapping
+
+        filtered: dict[str, object] = {}
+        for frame_key, mask_ref in mapping.items():
+            view_filters = self.state.view_filters_by_frame.get(frame_key)
+            if view_filters is None:
+                filtered[frame_key] = mask_ref
+                continue
+            label_values = self._effective_selection(
+                view_filters.class_options,
+                view_filters.selected_classes,
+                view_filters.all_classes_selected,
+            )
+            if label_values is not None and "manualMask" not in label_values:
+                continue
+            id_values = self._effective_selection(
+                view_filters.id_options,
+                view_filters.selected_ids,
+                view_filters.all_ids_selected,
+            )
+            if id_values is not None and 0 not in {int(value) for value in id_values}:
+                continue
+            instance_values = self._effective_selection(
+                [key for _label, key in view_filters.instance_options],
+                view_filters.selected_instances,
+                view_filters.all_instances_selected,
+            )
+            if instance_values is not None and self._manual_instance_key(frame_key) not in {str(value) for value in instance_values}:
+                continue
+            filtered[frame_key] = mask_ref
+        return filtered or None
+
     def _refresh_view_filters(self) -> None:
-        selected_class = self.filter_class_combo.currentData()
-        selected_id = self.filter_id_combo.currentData()
-        classes = sorted({str(obj.label) for obj in self._iter_result_objects() if obj.label})
-        ids = sorted({int(obj.track_id) for obj in self._iter_result_objects() if obj.track_id is not None})
+        result = self._current_frame_result()
+        frame_key = self._result_frame_key(result) if result is not None else self._current_source_key()
+        filters_map = self.state.view_filters_by_frame
+        is_new_frame_state = False
+        if frame_key is None:
+            filters = self.state.view_filters
+            if filters.frame_key is not None:
+                filters = ViewFilterState(frame_key=None)
+                self.state.view_filters = filters
+                is_new_frame_state = True
+        else:
+            existing = filters_map.get(frame_key)
+            if existing is None:
+                existing = ViewFilterState(frame_key=frame_key)
+                filters_map[frame_key] = existing
+                is_new_frame_state = True
+            filters = existing
+            self.state.view_filters = filters
+        filters.frame_key = frame_key
+
+        base_objects = self._current_frame_objects(include_suppressed=False)
+        classes = sorted({self._display_label_for_object(result, obj) for obj in base_objects}) if result is not None else []
+        ids = sorted({int(obj.track_id) for obj in base_objects if obj.track_id is not None})
         if self.state.mask_class:
-            classes = sorted(set(classes) | {self.state.mask_class})
+            classes = sorted(set(classes) | {str(self.state.mask_class)})
         if self.state.mask_id is not None:
             ids = sorted(set(ids) | {int(self.state.mask_id)})
-        if self.state.manual_mask_input is not None or self.state.manual_masks_by_key:
+        if self._manual_mask_present_for_current_frame():
             classes = sorted(set(classes) | {"manualMask"})
             ids = sorted(set(ids) | {0})
 
-        self.filter_class_combo.blockSignals(True)
-        self.filter_class_combo.clear()
-        self.filter_class_combo.addItem("All classes", None)
-        for value in classes:
-            self.filter_class_combo.addItem(value, value)
-        class_index = self.filter_class_combo.findData(selected_class)
-        self.filter_class_combo.setCurrentIndex(class_index if class_index >= 0 else 0)
-        self.filter_class_combo.blockSignals(False)
+        filters.class_options = classes
+        filters.id_options = ids
 
-        self.filter_id_combo.blockSignals(True)
-        self.filter_id_combo.clear()
-        self.filter_id_combo.addItem("All IDs", None)
-        for value in ids:
-            self.filter_id_combo.addItem(str(value), value)
-        id_index = self.filter_id_combo.findData(selected_id)
-        self.filter_id_combo.setCurrentIndex(id_index if id_index >= 0 else 0)
-        self.filter_id_combo.blockSignals(False)
+        if is_new_frame_state:
+            filters.all_classes_selected = True
+            filters.all_ids_selected = True
+            filters.selected_classes = set(classes)
+            filters.selected_ids = set(ids)
+            filters.all_instances_selected = True
+            filters.selected_instances = set()
+        else:
+            filters.selected_classes, filters.all_classes_selected = self._sync_selection_with_options(
+                filters.class_options,
+                filters.selected_classes,
+                all_selected=filters.all_classes_selected,
+            )
+            filters.selected_ids, filters.all_ids_selected = self._sync_selection_with_options(
+                filters.id_options,
+                filters.selected_ids,
+                all_selected=filters.all_ids_selected,
+            )
+
+        instance_entries = self._instance_filter_candidates(result)
+        filters.instance_options = instance_entries
+        instance_keys = [key for _label, key in instance_entries]
+        if is_new_frame_state:
+            filters.selected_instances = set(instance_keys)
+            filters.all_instances_selected = True
+        else:
+            filters.selected_instances, filters.all_instances_selected = self._sync_selection_with_options(
+                instance_keys,
+                filters.selected_instances,
+                all_selected=filters.all_instances_selected,
+            )
+
+        self._set_checkable_items(
+            self.filter_class_list,
+            [(value, value) for value in filters.class_options],
+            filters.selected_classes,
+            all_label="All Classes",
+            all_selected=filters.all_classes_selected,
+        )
+        self._set_checkable_items(
+            self.filter_id_list,
+            [(str(value), value) for value in filters.id_options],
+            filters.selected_ids,
+            all_label="All IDs",
+            all_selected=filters.all_ids_selected,
+        )
+        self._set_checkable_items(
+            self.filter_instance_list,
+            filters.instance_options,
+            filters.selected_instances,
+            all_label="All Instances",
+            all_selected=filters.all_instances_selected,
+        )
+        for widget in [self.filter_class_list, self.filter_id_list, self.filter_instance_list]:
+            self._resize_filter_list(widget)
+        self._refresh_filter_button_labels()
 
     def _selected_view_track_ids(self) -> set[int] | None:
-        value = self.filter_id_combo.currentData()
-        if value is None:
+        filters = self._filter_state()
+        values = self._effective_selection(filters.id_options, filters.selected_ids, filters.all_ids_selected)
+        if values is None:
             return None
-        return {int(value)}
+        return {int(value) for value in values}
 
     def _selected_view_labels(self) -> set[str] | None:
-        value = self.filter_class_combo.currentData()
-        if value is None:
+        filters = self._filter_state()
+        values = self._effective_selection(filters.class_options, filters.selected_classes, filters.all_classes_selected)
+        if values is None:
             return None
-        return {str(value)}
+        return {str(value) for value in values}
+
+    def _current_selected_objects(self) -> list[tuple[PredictionResult, SegmentationObject]]:
+        result = self._current_result()
+        if result is None or not self._result_matches_current_view(result):
+            return []
+        selected_keys = self._selected_view_instance_keys()
+        if selected_keys is None:
+            return []
+        selected_objects: list[tuple[PredictionResult, SegmentationObject]] = []
+        for obj in self._result_objects(result, apply_filters=False, include_suppressed=True):
+            if self._object_instance_key(result, obj) in selected_keys:
+                selected_objects.append((result, obj))
+        return selected_objects
+
+    def _delete_selected_mask(self) -> None:
+        selected = self._current_selected_objects()
+        if not selected:
+            QtWidgets.QMessageBox.warning(self, "No Instance Selected", "Check one or more instances in the View panel first.")
+            return
+        deleted_count = 0
+        for result, obj in selected:
+            frame_key = self._result_frame_key(result)
+            self.state.suppressed_objects_by_key.setdefault(frame_key, set()).add(self._object_instance_key(result, obj))
+            deleted_count += 1
+        self._refresh_view_filters()
+        self._update_result_panel()
+        self._refresh_preview()
+        self._append_log(f"Deleted {deleted_count} selected mask(s)")
+        self.statusBar().showMessage("Deleted selected mask")
+
+    def _delete_selected_track(self) -> None:
+        selected = self._current_selected_objects()
+        if not selected:
+            QtWidgets.QMessageBox.warning(self, "No Instance Selected", "Check one or more instances in the View panel first.")
+            return
+        track_scopes: dict[str, set[int]] = {}
+        for result, obj in selected:
+            if obj.track_id is not None:
+                scope = self._result_source_scope(result)
+                track_scopes.setdefault(scope, set()).add(int(obj.track_id))
+        if not track_scopes:
+            QtWidgets.QMessageBox.warning(self, "No Track ID", "None of the selected masks have track IDs.")
+            return
+        deleted_tracks = 0
+        for scope, track_ids in track_scopes.items():
+            self.state.suppressed_track_ids_by_source.setdefault(scope, set()).update(track_ids)
+            deleted_tracks += len(track_ids)
+        self._refresh_view_filters()
+        self._update_result_panel()
+        self._refresh_preview()
+        self._append_log(f"Deleted {deleted_tracks} selected track(s)")
+        self.statusBar().showMessage("Deleted selected track")
+
+    def _restore_deleted_masks(self) -> None:
+        self.state.suppressed_objects_by_key.clear()
+        self.state.suppressed_track_ids_by_source.clear()
+        self._refresh_view_filters()
+        self._update_result_panel()
+        self._refresh_preview()
+        self._append_log("Restored deleted masks")
+        self.statusBar().showMessage("Restored deleted masks")
 
     def _mask_visible_for_filters(self) -> bool:
         visible_ids = self._selected_view_track_ids()
         visible_labels = self._selected_view_labels()
+        prompt_class = str(self.state.mask_class).strip() if self.state.mask_class else "Unlabeled"
         if visible_ids is not None and self.state.mask_id not in visible_ids:
             return False
-        if visible_labels is not None and self.state.mask_class not in visible_labels:
+        if visible_labels is not None and prompt_class not in visible_labels:
             return False
         return True
 
     def _manual_mask_visible_for_filters(self) -> bool:
         visible_ids = self._selected_view_track_ids()
         visible_labels = self._selected_view_labels()
+        visible_instances = self._selected_view_instance_keys()
         if visible_ids is not None and 0 not in visible_ids:
             return False
         if visible_labels is not None and "manualMask" not in visible_labels:
             return False
+        if visible_instances is not None and self._manual_instance_key() not in visible_instances:
+            return False
+        return True
+
+    def _has_active_view_filters(self) -> bool:
+        selected_labels = self._selected_view_labels()
+        selected_ids = self._selected_view_track_ids()
+        selected_instances = self._selected_view_instance_keys()
+        if selected_labels is not None and len(selected_labels) == 0:
+            return False
+        if selected_ids is not None and len(selected_ids) == 0:
+            return False
+        if selected_instances is not None and len(selected_instances) == 0:
+            return False
+        # Any non-empty filter scope (including "All ...") should keep masks visible.
         return True
 
     def _allocate_mask_id(self) -> int:
@@ -468,6 +1267,58 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.result_panel.clear()
         if message:
             self.result_panel.appendPlainText(message)
+
+    def _apply_filter_change(self, kind: str, item: QtWidgets.QListWidgetItem) -> None:
+        filters = self._filter_state()
+        if kind == "class":
+            options = [value for value in filters.class_options]
+            selected = filters.selected_classes
+            all_selected = filters.all_classes_selected
+        elif kind == "id":
+            options = [value for value in filters.id_options]
+            selected = filters.selected_ids
+            all_selected = filters.all_ids_selected
+        else:
+            options = [key for _label, key in filters.instance_options]
+            selected = filters.selected_instances
+            all_selected = filters.all_instances_selected
+
+        changed_value = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        checked = item.checkState() == QtCore.Qt.CheckState.Checked
+        updated_selected, updated_all = self._apply_toggle_to_selection(
+            options,
+            selected,
+            all_selected,
+            changed_value=changed_value,
+            checked=checked,
+        )
+        if kind == "class":
+            filters.selected_classes = {str(value) for value in updated_selected}
+            filters.all_classes_selected = updated_all
+        elif kind == "id":
+            filters.selected_ids = {int(value) for value in updated_selected}
+            filters.all_ids_selected = updated_all
+        else:
+            filters.selected_instances = {str(value) for value in updated_selected}
+            filters.all_instances_selected = updated_all
+
+    def _handle_class_filter_change(self, item: QtWidgets.QListWidgetItem) -> None:
+        self._apply_filter_change("class", item)
+        self._refresh_view_filters()
+        self._update_result_panel()
+        self._refresh_preview()
+
+    def _handle_id_filter_change(self, item: QtWidgets.QListWidgetItem) -> None:
+        self._apply_filter_change("id", item)
+        self._refresh_view_filters()
+        self._update_result_panel()
+        self._refresh_preview()
+
+    def _handle_instance_filter_change(self, item: QtWidgets.QListWidgetItem) -> None:
+        self._apply_filter_change("instance", item)
+        self._refresh_view_filters()
+        self._update_result_panel()
+        self._refresh_preview()
 
     def _append_log(self, message: str) -> None:
         self.result_panel.appendPlainText(message)
@@ -721,6 +1572,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.state.mask_ids_by_key.clear()
         self.state.mask_classes_by_key.clear()
         self.state.manual_masks_by_key.clear()
+        self.state.suppressed_objects_by_key.clear()
+        self.state.suppressed_track_ids_by_source.clear()
         self.state.mask_path = None
         self.state.mask_input = None
         self.state.mask_source = None
@@ -750,6 +1603,10 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
 
     def _reset_result_view(self) -> None:
         self.state.results = None
+        self.state.suppressed_objects_by_key.clear()
+        self.state.suppressed_track_ids_by_source.clear()
+        self.state.view_filters_by_frame.clear()
+        self.state.view_filters = ViewFilterState()
         self.state.current_frame_index = 0
         self._refresh_view_filters()
         self._reset_playback()
@@ -951,6 +1808,52 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._refresh_view_filters()
         self._refresh_preview()
         self._append_log(f"Copied manualMask id 0 to {len(targets)} frame(s)")
+
+    def _copy_manual_mask_to_range(self) -> None:
+        if self.state.manual_mask_input is None:
+            QtWidgets.QMessageBox.warning(self, "No Manual Mask", "Create a manual mask first.")
+            return
+        if self.state.source_kind not in {"directory", "video"}:
+            QtWidgets.QMessageBox.warning(self, "Unsupported Source", "Range copy requires a folder or video source.")
+            return
+
+        prev_count = int(self.copy_manual_prev_spin.value())
+        next_count = int(self.copy_manual_next_spin.value())
+        if prev_count <= 0 and next_count <= 0:
+            QtWidgets.QMessageBox.warning(self, "Invalid Range", "Set Prev and/or Next to a value greater than 0.")
+            return
+
+        current_index = self._current_source_index()
+        if self.state.source_kind == "directory":
+            total_count = len(self.state.source_items)
+        else:
+            total_count = int(self.state.source_frame_count or 0)
+        if total_count <= 0:
+            return
+
+        start_index = max(0, current_index - prev_count)
+        end_index = min(total_count - 1, current_index + next_count)
+        target_indices = [index for index in range(start_index, end_index + 1) if index != current_index]
+        if not target_indices:
+            self._append_log("No neighboring frames in selected range; nothing copied.")
+            return
+
+        mask = np.asarray(self.state.manual_mask_input, dtype=np.float32).copy()
+        total = len(target_indices)
+        for item_index, frame_index in enumerate(target_indices, start=1):
+            key = self._current_source_key(frame_index)
+            if key is None:
+                continue
+            cached_path, _cached_mask = self._cache_manual_mask(key, mask)
+            self.state.manual_masks_by_key[key] = cached_path
+            self._append_log(f"[{item_index}/{total}] Copied manualMask id 0 to {self._format_source_key_label(key)}")
+
+        self._refresh_view_filters()
+        self._refresh_preview()
+        self._append_log(
+            f"Copied manualMask id 0 to {len(target_indices)} frame(s) around current "
+            f"({self._playback_label_prefix()} {current_index + 1})"
+        )
 
     def _clear_mask(self, reset_label: bool = True, *, update_preview: bool = True) -> None:
         key = self._current_source_key()
@@ -1297,6 +2200,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             return
 
         self.preview_timer.stop()
+        self._run_cache_epoch += 1
         export_dir = self.export_dir_edit.text().strip() or None
         auto_export_dir = export_dir if self.auto_export_masks_checkbox.isChecked() else None
         merged_mask_only = self.merge_masks_only_checkbox.isChecked()
@@ -1697,9 +2601,17 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             self._append_log("Cancellation requested")
 
     @staticmethod
-    def _clone_segmentation_object(obj: SegmentationObject, object_index: int) -> SegmentationObject:
+    def _clone_segmentation_object(
+        obj: SegmentationObject,
+        object_index: int,
+        *,
+        copy_mask: bool = False,
+    ) -> SegmentationObject:
+        mask = obj.mask
+        if copy_mask:
+            mask = np.asarray(obj.mask).copy()
         return SegmentationObject(
-            mask=np.asarray(obj.mask).copy(),
+            mask=mask,
             box=obj.box,
             score=obj.score,
             label=obj.label,
@@ -1712,9 +2624,9 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             return incoming
         objects: list[SegmentationObject] = []
         for obj in existing.objects:
-            objects.append(self._clone_segmentation_object(obj, len(objects) + 1))
+            objects.append(self._clone_segmentation_object(obj, len(objects) + 1, copy_mask=False))
         for obj in incoming.objects:
-            objects.append(self._clone_segmentation_object(obj, len(objects) + 1))
+            objects.append(self._clone_segmentation_object(obj, len(objects) + 1, copy_mask=False))
         image = incoming.image if incoming.image is not None else existing.image
         prompt_mask = incoming.prompt_mask if incoming.prompt_mask is not None else existing.prompt_mask
         return PredictionResult(
@@ -1727,8 +2639,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             prompt_metadata=dict(incoming.prompt_metadata or existing.prompt_metadata),
             tracking_metadata=dict(incoming.tracking_metadata or existing.tracking_metadata),
             timings=dict(incoming.timings or existing.timings),
-            image=None if image is None else np.asarray(image).copy(),
-            prompt_mask=None if prompt_mask is None else np.asarray(prompt_mask).copy(),
+            image=image,
+            prompt_mask=prompt_mask,
         )
 
     def _apply_inference_result(self, result):
@@ -1753,11 +2665,20 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         return self._merge_prediction_result(self.state.results, result)
 
     def _handle_result(self, result) -> None:
+        if not self.append_inference_checkbox.isChecked():
+            self.state.suppressed_objects_by_key.clear()
+            self.state.suppressed_track_ids_by_source.clear()
         if self._streaming_batch_mode and isinstance(result, list):
             if not self.append_inference_checkbox.isChecked():
                 self.state.results = self._cache_results(result)
         else:
-            self.state.results = self._cache_results(self._apply_inference_result(result))
+            applied_result = self._apply_inference_result(result)
+            if self.append_inference_checkbox.isChecked() and isinstance(applied_result, list):
+                # Keep existing cached frame results intact and avoid re-caching
+                # every frame when append mode updates only one frame.
+                self.state.results = applied_result
+            else:
+                self.state.results = self._cache_results(applied_result)
         self._refresh_view_filters()
         if isinstance(self.state.results, list):
             current_index = min(self._current_source_index(), len(self.state.results) - 1)
@@ -1793,11 +2714,18 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
     def _handle_batch_item_result(self, index: int, total: int, result, label: str) -> None:
         if result is None or total <= 0:
             return
+        if not self.append_inference_checkbox.isChecked():
+            self.state.suppressed_objects_by_key.clear()
+            self.state.suppressed_track_ids_by_source.clear()
         if not isinstance(self.state.results, list) or len(self.state.results) != total:
             self.state.results = [None] * total
         existing = self.state.results[index] if 0 <= index < len(self.state.results) else None
-        merged_result = self._merge_prediction_result(existing, result) if self.append_inference_checkbox.isChecked() and existing is not None else result
-        self.state.results[index] = self._cache_result(merged_result, f"{label}_{index}")
+        cache_key = f"run{self._run_cache_epoch}_{index}_{self._cache_token(label)}"
+        cached_incoming = self._cache_result(result, cache_key)
+        if self.append_inference_checkbox.isChecked() and existing is not None:
+            self.state.results[index] = self._merge_prediction_result(existing, cached_incoming)
+        else:
+            self.state.results[index] = cached_incoming
         self.seek_slider.setValue(index)
         self.state.current_frame_index = index
         self._refresh_view_filters()
@@ -1869,6 +2797,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         if not self._result_matches_current_view(result):
             self._set_result_summary("No inference result for the current view.")
             return
+        visible_objects = self._result_objects(result, apply_filters=True, include_suppressed=False)
+        hidden_count = len(result.objects) - len(self._result_objects(result, apply_filters=False, include_suppressed=False))
         lines = []
         if isinstance(self.state.results, list) and self.state.source_kind == "directory":
             lines.append(f"Batch Images: {len(self.state.results)}")
@@ -1878,7 +2808,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 f"Mode: {result.mode}",
                 f"Image Size: {result.image_size}",
                 f"Inference Size: {result.inference_image_size}",
-                f"Objects: {len(result.objects)}",
+                f"Objects: {len(visible_objects)} visible / {len(result.objects)} total",
+                f"Deleted: {hidden_count}",
                 f"Prompts: {result.prompt_metadata}",
                 f"Tracking: {result.tracking_metadata}",
                 f"Timings: {result.timings}",
@@ -1927,6 +2858,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.step_back_button.setEnabled(can_advance)
         self.step_forward_button.setEnabled(can_advance)
         self.frame_label.setText(f"{self._playback_label_prefix()} {current_index + 1}/{count}")
+        self.frame_jump_edit.setEnabled(True)
+        self.frame_jump_edit.setText(str(current_index + 1))
 
     def _result_matches_current_view(self, result) -> bool:
         if result is None:
@@ -1945,7 +2878,10 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._sync_current_mask_state()
         count = self._playback_count()
         if count > 0:
-            self.frame_label.setText(f"{self._playback_label_prefix()} {self.seek_slider.value() + 1}/{count}")
+            current_one_based = self.seek_slider.value() + 1
+            self.frame_label.setText(f"{self._playback_label_prefix()} {current_one_based}/{count}")
+            self.frame_jump_edit.setText(str(current_one_based))
+        self._refresh_view_filters()
         self._update_result_panel()
         self._refresh_preview()
 
@@ -1965,6 +2901,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             result = None
 
         if result is not None:
+            filtered_result = self._filtered_result_copy(result, apply_view_filters=True)
             if result.image is not None:
                 frame = result.image
             elif self.state.source_kind == "video" and self.state.source_path:
@@ -1977,13 +2914,11 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 return
             overlay = render_overlay(
                 frame,
-                result,
+                filtered_result,
                 opacity=self.opacity_slider.value() / 100.0,
                 show_labels=self.show_labels_checkbox.isChecked(),
-                show_masks=self.show_masks_checkbox.isChecked(),
+                show_masks=self.show_masks_checkbox.isChecked() or self._has_active_view_filters(),
                 show_track_ids=self.show_track_ids_checkbox.isChecked(),
-                visible_track_ids=self._selected_view_track_ids(),
-                visible_labels=self._selected_view_labels(),
             )
             self.preview_canvas.set_image(overlay)
         elif self.state.source_kind == "video" and self.state.source_path:
@@ -2004,6 +2939,23 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             return
         next_index = (self.seek_slider.value() + delta) % count
         self.seek_slider.setValue(next_index)
+
+    def _jump_to_frame(self) -> None:
+        count = self._playback_count()
+        if count <= 0:
+            self.frame_jump_edit.clear()
+            return
+        text = self.frame_jump_edit.text().strip()
+        if not text:
+            self.frame_jump_edit.setText(str(self.seek_slider.value() + 1))
+            return
+        try:
+            one_based = int(text)
+        except ValueError:
+            self.frame_jump_edit.setText(str(self.seek_slider.value() + 1))
+            return
+        one_based = max(1, min(one_based, count))
+        self.seek_slider.setValue(one_based - 1)
 
     def _toggle_playback(self) -> None:
         if self._playback_count() <= 1:
@@ -2027,6 +2979,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.play_button.setEnabled(False)
         self.step_back_button.setEnabled(False)
         self.step_forward_button.setEnabled(False)
+        self.frame_jump_edit.setEnabled(False)
+        self.frame_jump_edit.clear()
         self.seek_slider.setEnabled(False)
         self.seek_slider.setRange(0, 0)
         self.frame_label.setText("Frame 0/0")
@@ -2042,18 +2996,24 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         if not export_dir:
             QtWidgets.QMessageBox.warning(self, "Missing Export Directory", "Select an export directory first.")
             return
+        apply_view_filters = True
+        export_results = self._results_for_export(apply_view_filters=apply_view_filters)
+        if isinstance(export_results, list):
+            export_results = [item for item in export_results if item is not None]
+        export_manual_masks = self._manual_masks_for_export(apply_view_filters=apply_view_filters)
+
         def job(progress_callback=None, cancel_callback=None):
             if cancel_callback is not None and cancel_callback():
                 return None
             return self.backend.save_results(
-                self.state.results,
+                export_results,
                 output_dir=None,
                 mask_dir=export_dir,
                 save_overlay=False,
                 save_json=False,
                 merged_mask_only=self.merge_masks_only_checkbox.isChecked(),
                 invert_mask=self.invert_mask_export_checkbox.isChecked(),
-                manual_masks_by_key=self.state.manual_masks_by_key or None,
+                manual_masks_by_key=export_manual_masks,
                 dilation_pixels=int(self.export_dilation_spin.value()),
                 progress_callback=progress_callback,
             )

@@ -26,6 +26,77 @@ def _label_from_names(names: Any, class_index: int | None) -> str | None:
     return None
 
 
+def _is_numeric_label(label: str | None) -> bool:
+    if label is None:
+        return False
+    text = str(label).strip()
+    return bool(text) and text.isdigit()
+
+
+def _mask_iou(left: np.ndarray, right: np.ndarray) -> float:
+    left_mask = np.asarray(left) > 0
+    right_mask = np.asarray(right) > 0
+    if left_mask.shape != right_mask.shape:
+        return 0.0
+    intersection = np.logical_and(left_mask, right_mask).sum()
+    union = np.logical_or(left_mask, right_mask).sum()
+    if union <= 0:
+        return 0.0
+    return float(intersection / union)
+
+
+def _box_iou(left: tuple[float, float, float, float] | None, right: tuple[float, float, float, float] | None) -> float:
+    if left is None or right is None:
+        return 0.0
+    lx1, ly1, lx2, ly2 = left
+    rx1, ry1, rx2, ry2 = right
+    ix1 = max(lx1, rx1)
+    iy1 = max(ly1, ry1)
+    ix2 = min(lx2, rx2)
+    iy2 = min(ly2, ry2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0
+    left_area = max(0.0, lx2 - lx1) * max(0.0, ly2 - ly1)
+    right_area = max(0.0, rx2 - rx1) * max(0.0, ry2 - ry1)
+    union = left_area + right_area - inter
+    if union <= 0.0:
+        return 0.0
+    return float(inter / union)
+
+
+def _propagate_semantic_labels(seed: PredictionResult, refined: PredictionResult, prompt_texts: list[str]) -> None:
+    semantic_seeds = [obj for obj in seed.objects if obj.label and not _is_numeric_label(obj.label)]
+    prompt_labels = [str(text).strip() for text in prompt_texts if str(text).strip()]
+    for obj in refined.objects:
+        current_label = str(obj.label).strip() if obj.label is not None else ""
+        if current_label and not _is_numeric_label(current_label):
+            continue
+        best_label: str | None = None
+        best_score = 0.0
+        for seed_obj in semantic_seeds:
+            score = _mask_iou(np.asarray(obj.mask), np.asarray(seed_obj.mask))
+            if score <= 0.0:
+                score = _box_iou(obj.box, seed_obj.box)
+            if score > best_score:
+                best_score = score
+                best_label = str(seed_obj.label).strip()
+        if best_label:
+            obj.label = best_label
+            continue
+        if current_label.isdigit() and prompt_labels:
+            index = int(current_label)
+            if 0 <= index < len(prompt_labels):
+                obj.label = prompt_labels[index]
+                continue
+        if len(prompt_labels) == 1:
+            obj.label = prompt_labels[0]
+            continue
+        obj.label = "Unlabeled"
+
+
 def normalize_ultralytics_result(result, payload: PromptPayload, *, mode: str, frame_index: int | None) -> PredictionResult:
     """Convert an Ultralytics result into the normalized schema."""
     boxes = getattr(result, "boxes", None)
@@ -351,6 +422,7 @@ def run_image_prediction(model_loader, source, payload: PromptPayload, exemplar_
         )
         raw_results = _run_interactive_image_predictor(model_loader, source, refined_payload)
         normalized = normalize_ultralytics_result(raw_results[0], payload, mode="image", frame_index=None)
+        _propagate_semantic_labels(semantic_seed, normalized, payload.texts)
         normalized.prompt_metadata["compatibility_mode"] = "semantic_text_then_interactive_refine"
         normalized.prompt_metadata["semantic_seed_object_count"] = len(semantic_seed.objects)
         normalized.prompt_metadata["refinement_box_count"] = len(refined_payload.boxes)
