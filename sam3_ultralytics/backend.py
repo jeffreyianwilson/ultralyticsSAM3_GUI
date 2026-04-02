@@ -126,8 +126,12 @@ class SAM3Ultralytics:
         overwrite: bool = True,
         merged_mask_only: bool = False,
         invert_mask: bool = False,
+        preserve_source_filenames: bool = False,
+        cancel_callback=None,
     ) -> PredictionResult:
         """Run image segmentation against a single image-like input."""
+        if cancel_callback is not None and cancel_callback():
+            raise InferenceCancelledError("Image inference was cancelled.")
         resolved_scale = normalize_inference_scale(inference_scale)
         inference_source, scaled_points, scaled_boxes, scaled_mask_input, transform = prepare_inference_source(
             source,
@@ -147,6 +151,8 @@ class SAM3Ultralytics:
         )
         validate_prompt_payload(payload, is_video=False)
         result = run_image_prediction(self.model_loader, inference_source, payload, exemplar_adapter=self.exemplar_adapter)
+        if cancel_callback is not None and cancel_callback():
+            raise InferenceCancelledError("Image inference was cancelled.")
         result = apply_inference_transform(result, transform, source=source)
         if export_mask_dir is not None or output_dir is not None:
             export_results(
@@ -157,6 +163,7 @@ class SAM3Ultralytics:
                 save_overlay=output_dir is not None,
                 merged_mask_only=merged_mask_only,
                 invert_mask=invert_mask,
+                preserve_source_filenames=preserve_source_filenames,
             )
         return result
 
@@ -182,6 +189,7 @@ class SAM3Ultralytics:
         overwrite: bool = True,
         merged_mask_only: bool = False,
         invert_mask: bool = False,
+        preserve_source_filenames: bool = False,
         progress_callback=None,
         cancel_callback=None,
     ) -> list[PredictionResult]:
@@ -215,6 +223,7 @@ class SAM3Ultralytics:
                 save_overlay=output_dir is not None,
                 merged_mask_only=merged_mask_only,
                 invert_mask=invert_mask,
+                preserve_source_filenames=preserve_source_filenames,
             )
         return results
 
@@ -242,6 +251,7 @@ class SAM3Ultralytics:
         overwrite: bool = True,
         merged_mask_only: bool = False,
         invert_mask: bool = False,
+        preserve_source_filenames: bool = False,
         progress_callback=None,
         cancel_callback=None,
         item_start_callback=None,
@@ -289,6 +299,7 @@ class SAM3Ultralytics:
                 mask_id=mask_id,
                 mask_label=mask_label,
                 inference_scale=inference_scale,
+                preserve_source_filenames=preserve_source_filenames,
             )
             reference_mask = None
             if current_mask is not None:
@@ -343,6 +354,7 @@ class SAM3Ultralytics:
                 save_overlay=output_dir is not None,
                 merged_mask_only=merged_mask_only,
                 invert_mask=invert_mask,
+                preserve_source_filenames=preserve_source_filenames,
             )
         return results
 
@@ -363,6 +375,7 @@ class SAM3Ultralytics:
         overwrite: bool = True,
         merged_mask_only: bool = False,
         invert_mask: bool = False,
+        preserve_source_filenames: bool = False,
         progress_callback=None,
         cancel_callback=None,
     ) -> list[PredictionResult]:
@@ -382,6 +395,7 @@ class SAM3Ultralytics:
             overwrite=overwrite,
             merged_mask_only=merged_mask_only,
             invert_mask=invert_mask,
+            preserve_source_filenames=preserve_source_filenames,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
         )
@@ -409,6 +423,7 @@ class SAM3Ultralytics:
         overwrite: bool = True,
         merged_mask_only: bool = False,
         invert_mask: bool = False,
+        preserve_source_filenames: bool = False,
         progress_callback=None,
         cancel_callback=None,
         item_start_callback=None,
@@ -453,6 +468,7 @@ class SAM3Ultralytics:
                 mask_id=mask_id,
                 mask_label=mask_label,
                 inference_scale=inference_scale,
+                preserve_source_filenames=preserve_source_filenames,
             )
             result.source = str(source)
             result.mode = "video"
@@ -476,6 +492,7 @@ class SAM3Ultralytics:
                 save_overlay=output_dir is not None,
                 merged_mask_only=merged_mask_only,
                 invert_mask=invert_mask,
+                preserve_source_filenames=preserve_source_filenames,
             )
         return results
 
@@ -502,6 +519,7 @@ class SAM3Ultralytics:
         overwrite: bool = True,
         merged_mask_only: bool = False,
         invert_mask: bool = False,
+        preserve_source_filenames: bool = False,
         progress_callback=None,
         cancel_callback=None,
     ) -> list[PredictionResult]:
@@ -536,6 +554,7 @@ class SAM3Ultralytics:
                 save_overlay=output_dir is not None,
                 merged_mask_only=merged_mask_only,
                 invert_mask=invert_mask,
+                preserve_source_filenames=preserve_source_filenames,
             )
         return results
 
@@ -562,6 +581,7 @@ class SAM3Ultralytics:
         overwrite: bool = True,
         merged_mask_only: bool = False,
         invert_mask: bool = False,
+        preserve_source_filenames: bool = False,
         progress_callback=None,
         cancel_callback=None,
         item_start_callback=None,
@@ -633,6 +653,7 @@ class SAM3Ultralytics:
                 save_overlay=output_dir is not None,
                 merged_mask_only=merged_mask_only,
                 invert_mask=invert_mask,
+                preserve_source_filenames=preserve_source_filenames,
             )
         return results
 
@@ -650,6 +671,7 @@ class SAM3Ultralytics:
         overwrite: bool = True,
         merged_mask_only: bool = False,
         invert_mask: bool = False,
+        preserve_source_filenames: bool = False,
         progress_callback=None,
         cancel_callback=None,
     ) -> list[PredictionResult] | list[list[PredictionResult]]:
@@ -673,6 +695,7 @@ class SAM3Ultralytics:
                     overwrite=overwrite,
                     merged_mask_only=merged_mask_only,
                     invert_mask=invert_mask,
+                    preserve_source_filenames=preserve_source_filenames,
                 )
             else:
                 result = self.predict_image(
@@ -687,6 +710,7 @@ class SAM3Ultralytics:
                     overwrite=overwrite,
                     merged_mask_only=merged_mask_only,
                     invert_mask=invert_mask,
+                    preserve_source_filenames=preserve_source_filenames,
                 )
             outputs.append(result)
             if progress_callback is not None:
@@ -709,6 +733,7 @@ class SAM3Ultralytics:
         invert_mask: bool = False,
         manual_masks_by_key: dict[str, object] | None = None,
         dilation_pixels: int = 0,
+        preserve_source_filenames: bool = False,
         progress_callback=None,
     ):
         """Export normalized results."""
@@ -726,5 +751,6 @@ class SAM3Ultralytics:
             invert_mask=invert_mask,
             manual_masks_by_key=manual_masks_by_key,
             dilation_pixels=dilation_pixels,
+            preserve_source_filenames=preserve_source_filenames,
             progress_callback=progress_callback,
         )

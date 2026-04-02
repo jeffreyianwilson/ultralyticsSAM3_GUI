@@ -8,12 +8,15 @@ import traceback
 
 from PySide6 import QtCore
 
+from .exceptions import InferenceCancelledError
+
 
 class WorkerSignals(QtCore.QObject):
     """Signals emitted by background tasks."""
 
     result = QtCore.Signal(object)
     error = QtCore.Signal(str)
+    cancelled = QtCore.Signal(str)
     finished = QtCore.Signal()
     progress = QtCore.Signal(int, int, str)
     item_started = QtCore.Signal(int, int, str)
@@ -43,6 +46,8 @@ class BackendTask(QtCore.QRunnable):
             if self._supports_callback_kwarg("item_result_callback"):
                 callback_kwargs["item_result_callback"] = self._emit_item_result
             result = self.fn(*self.args, **callback_kwargs, **self.kwargs)
+        except InferenceCancelledError as exc:
+            self.signals.cancelled.emit(str(exc) or "Operation cancelled.")
         except Exception:
             self.signals.error.emit(traceback.format_exc())
         else:

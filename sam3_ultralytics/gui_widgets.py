@@ -27,6 +27,7 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._boxes: list[tuple[float, float, float, float, int]] = []
         self._prompt_mask_preview: np.ndarray | None = None
         self._manual_mask_preview: np.ndarray | None = None
+        self._manual_mask_editable = False
         self._brush_radius = 14
         self._drag_start = None
         self._drag_current = None
@@ -43,6 +44,7 @@ class PreviewCanvas(QtWidgets.QWidget):
             self._manual_mask_path = []
             self._painting_manual_mask = False
             self._last_paint_point = None
+            self._manual_mask_editable = False
         self.update()
 
     def set_brush_radius(self, radius: int) -> None:
@@ -50,7 +52,7 @@ class PreviewCanvas(QtWidgets.QWidget):
         self.update()
 
     def set_image(self, image_bgr: np.ndarray | None) -> None:
-        self._image = image_bgr.copy() if image_bgr is not None else None
+        self._image = image_bgr
         if self._image is None:
             self._pixmap = None
         else:
@@ -58,19 +60,21 @@ class PreviewCanvas(QtWidgets.QWidget):
             height, width, channels = rgb.shape
             bytes_per_line = channels * width
             qimage = QtGui.QImage(rgb.data, width, height, bytes_per_line, QtGui.QImage.Format.Format_RGB888)
-            self._pixmap = QtGui.QPixmap.fromImage(qimage.copy())
+            self._pixmap = QtGui.QPixmap.fromImage(qimage)
             if self._prompt_mask_preview is not None and self._prompt_mask_preview.shape != self._image.shape[:2]:
-                self._prompt_mask_preview = cv2.resize(
-                    self._prompt_mask_preview,
+                resized = cv2.resize(
+                    self._prompt_mask_preview.astype(np.uint8, copy=False),
                     (self._image.shape[1], self._image.shape[0]),
                     interpolation=cv2.INTER_NEAREST,
                 )
+                self._prompt_mask_preview = resized > 0
             if self._manual_mask_preview is not None and self._manual_mask_preview.shape != self._image.shape[:2]:
-                self._manual_mask_preview = cv2.resize(
-                    self._manual_mask_preview,
+                resized = cv2.resize(
+                    self._manual_mask_preview.astype(np.uint8, copy=False),
                     (self._image.shape[1], self._image.shape[0]),
                     interpolation=cv2.INTER_NEAREST,
                 )
+                self._manual_mask_preview = resized > 0
         self.update()
 
     def set_prompt_overlays(
@@ -83,11 +87,20 @@ class PreviewCanvas(QtWidgets.QWidget):
         self.update()
 
     def set_prompt_mask_preview(self, mask: np.ndarray | None) -> None:
-        self._prompt_mask_preview = None if mask is None else np.asarray(mask, dtype=np.float32).copy()
+        if mask is None:
+            self._prompt_mask_preview = None
+        else:
+            array = np.asarray(mask)
+            self._prompt_mask_preview = array if array.dtype == np.bool_ else (array > 0)
         self.update()
 
     def set_manual_mask_preview(self, mask: np.ndarray | None) -> None:
-        self._manual_mask_preview = None if mask is None else np.asarray(mask, dtype=np.float32).copy()
+        if mask is None:
+            self._manual_mask_preview = None
+        else:
+            array = np.asarray(mask)
+            self._manual_mask_preview = array if array.dtype == np.bool_ else (array > 0)
+        self._manual_mask_editable = False
         self.update()
 
     def set_mask_preview(self, mask: np.ndarray | None) -> None:
@@ -107,6 +120,7 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._manual_mask_path = []
         self._painting_manual_mask = False
         self._last_paint_point = None
+        self._manual_mask_editable = False
         self.update()
 
     def _image_rect(self) -> QtCore.QRectF | None:
@@ -139,14 +153,21 @@ class PreviewCanvas(QtWidgets.QWidget):
             return False
         target_shape = self._image.shape[:2]
         if self._manual_mask_preview is None:
-            self._manual_mask_preview = np.zeros(target_shape, dtype=np.float32)
+            self._manual_mask_preview = np.zeros(target_shape, dtype=np.bool_)
+            self._manual_mask_editable = True
             return True
         if self._manual_mask_preview.shape != target_shape:
-            self._manual_mask_preview = cv2.resize(
-                self._manual_mask_preview,
+            resized = cv2.resize(
+                self._manual_mask_preview.astype(np.uint8, copy=False),
                 (target_shape[1], target_shape[0]),
                 interpolation=cv2.INTER_NEAREST,
             )
+            self._manual_mask_preview = resized > 0
+            self._manual_mask_editable = True
+            return True
+        if not self._manual_mask_editable:
+            self._manual_mask_preview = np.array(self._manual_mask_preview, dtype=np.bool_, copy=True)
+            self._manual_mask_editable = True
         return True
 
     def _append_manual_mask_point(self, mapped: tuple[float, float] | None) -> None:
@@ -164,15 +185,15 @@ class PreviewCanvas(QtWidgets.QWidget):
             return
         # Brush painting is applied to a temporary stroke mask first so add/remove
         # operations stay simple and deterministic on the stored manual mask layer.
-        stroke = np.zeros_like(self._manual_mask_preview, dtype=np.float32)
+        stroke = np.zeros_like(self._manual_mask_preview, dtype=np.uint8)
         start_pt = (int(round(start[0])), int(round(start[1])))
         end_pt = (int(round(end[0])), int(round(end[1])))
-        cv2.line(stroke, start_pt, end_pt, 1.0, thickness=max(1, int(self._brush_radius * 2)))
-        cv2.circle(stroke, end_pt, max(1, int(self._brush_radius)), 1.0, thickness=-1)
+        cv2.line(stroke, start_pt, end_pt, 1, thickness=max(1, int(self._brush_radius * 2)))
+        cv2.circle(stroke, end_pt, max(1, int(self._brush_radius)), 1, thickness=-1)
         if self._manual_paint_mode == "erase":
-            self._manual_mask_preview[stroke > 0] = 0.0
+            self._manual_mask_preview[stroke > 0] = False
         else:
-            self._manual_mask_preview[stroke > 0] = 1.0
+            self._manual_mask_preview[stroke > 0] = True
 
     def _commit_manual_mask_path(self) -> None:
         if not self._drawing_manual_mask or len(self._manual_mask_path) < 3 or not self._ensure_editable_manual_mask():
@@ -181,9 +202,9 @@ class PreviewCanvas(QtWidgets.QWidget):
             self.update()
             return
         polygon = np.array([[int(round(x)), int(round(y))] for x, y in self._manual_mask_path], dtype=np.int32)
-        fill = np.zeros_like(self._manual_mask_preview, dtype=np.float32)
-        cv2.fillPoly(fill, [polygon], 1.0)
-        self._manual_mask_preview[fill > 0] = 1.0
+        fill = np.zeros_like(self._manual_mask_preview, dtype=np.uint8)
+        cv2.fillPoly(fill, [polygon], 1)
+        self._manual_mask_preview[fill > 0] = True
         self._drawing_manual_mask = False
         self._manual_mask_path = []
         self.manual_mask_changed.emit(self._manual_mask_preview.copy())
@@ -264,9 +285,8 @@ class PreviewCanvas(QtWidgets.QWidget):
     def _draw_mask_overlay(self, painter: QtGui.QPainter, rect: QtCore.QRectF, mask: np.ndarray | None, color: tuple[int, int, int], alpha_scale: int) -> None:
         if mask is None or self._pixmap is None:
             return
-        preview = np.clip(mask, 0.0, 1.0)
-        resized = cv2.resize(preview, (self._pixmap.width(), self._pixmap.height()), interpolation=cv2.INTER_NEAREST)
-        alpha = (resized * alpha_scale).astype(np.uint8)
+        resized = cv2.resize(np.asarray(mask, dtype=np.uint8), (self._pixmap.width(), self._pixmap.height()), interpolation=cv2.INTER_NEAREST)
+        alpha = np.where(resized > 0, alpha_scale, 0).astype(np.uint8, copy=False)
         rgba = np.zeros((resized.shape[0], resized.shape[1], 4), dtype=np.uint8)
         rgba[..., 0] = color[0]
         rgba[..., 1] = color[1]
@@ -279,7 +299,7 @@ class PreviewCanvas(QtWidgets.QWidget):
             rgba.shape[1] * 4,
             QtGui.QImage.Format.Format_RGBA8888,
         )
-        painter.drawImage(rect, qimage.copy())
+        painter.drawImage(rect, qimage)
 
     def _draw_manual_mask_path(self, painter: QtGui.QPainter) -> None:
         if self._pixmap is None or len(self._manual_mask_path) < 2:
@@ -327,7 +347,7 @@ class PreviewCanvas(QtWidgets.QWidget):
                 if p1 is not None and p2 is not None:
                     painter.setPen(QtGui.QPen(QtGui.QColor("#ffd666"), 2, QtCore.Qt.PenStyle.DashLine))
                     painter.drawRect(QtCore.QRectF(p1, p2).normalized())
-            if self._manual_mask_preview is not None and np.any(self._manual_mask_preview > 0):
+            if self._manual_mask_preview is not None and np.any(self._manual_mask_preview):
                 painter.setPen(QtGui.QPen(QtGui.QColor("#00d278"), 2))
                 painter.drawText(rect.adjusted(10, 18, -10, -10), "manualMask id=0")
         else:

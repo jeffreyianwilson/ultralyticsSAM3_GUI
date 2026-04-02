@@ -29,13 +29,16 @@ class ViewFilterState:
 class GUIState:
     """Mutable GUI state stored on the main window."""
 
+    project_path: str | None = None
+    project_cache_dir: str | None = None
+    project_name: str | None = None
+    dirty: bool = False
     source_path: str | None = None
     source_kind: str = "image"
     source_items: list[str] = field(default_factory=list)
     source_frame_count: int | None = None
     export_dir: str | None = None
     cache_dir: str | None = None
-    compact_cache_enabled: bool = True
     inference_scale_enabled: bool = False
     inference_scale: float = 1.0
     mask_path: str | None = None

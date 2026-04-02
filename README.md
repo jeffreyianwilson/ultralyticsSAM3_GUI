@@ -25,6 +25,7 @@ This application was entirely written by AI, it is strongly recommended to revie
 - Frame-scoped view filtering by class, ID, and instance
 - Overlay, JSON, and raw mask export
 - Cache-backed mask and result storage
+- Save/loadable GUI project sessions with per-project sidecar caches
 - Reusable loaded model instance across runs for lower overhead
 
 ## Current Issues
@@ -111,8 +112,32 @@ sam3-ultralytics
 - Select the SAM 3 checkpoint in `Model`
 - Select `Device`
 - Choose a `Cache` directory for disk-backed inference state
-- Enable `Use compact cache archives (recommended)` to store masks in compact v2 archives instead of large raster cache files
-- Use `Clear Cache` when you want to reset the cache directory
+- Compact v2 cache archives are always used by default. The app stores cropped, bit-packed `.npz` cache data instead of large raster `.npy` mask dumps.
+- Use `Clear Cache` when you want to reset the active cache directory. The app shows a confirmation dialog before deleting the current project cache or unsaved-session cache.
+
+### 1b. Save and Reopen Projects
+
+Use the `File` menu to manage persistent GUI sessions:
+
+- `New Project`
+- `Open Project...`
+- `Save Project`
+- `Save Project As...`
+
+Project behavior:
+
+- Saved projects use a sidecar cache folder next to the project file, for example:
+  - `my_session.sam3proj.json`
+  - `my_session.sam3_cache/`
+- Unsaved sessions continue using the default cache directory.
+- Project files restore:
+  - current source and frame
+  - prompts and prompt masks
+  - manual masks
+  - cached inference results
+  - per-frame view filters
+  - runtime and export settings
+- The window title shows the project name and an unsaved marker when there are pending changes.
 
 ### 2. Load a Source
 
@@ -175,9 +200,15 @@ Inside the `View/Export` rollout:
 - `Export Directory`
 - `Auto-export masks after inference`
 - `Export merged masks only`
+- `Use original source filename for merged masks`
 - `Invert exported masks`
 - `Mask Dilation (px)`
 - `Export Masks`
+
+Merged-mask export notes:
+
+- When `Use original source filename for merged masks` is enabled, merged image masks keep the source filename instead of appending a suffix.
+- If the export directory matches the source image directory while this option is enabled, the app blocks the export and warns that masks cannot overwrite source imagery.
 
 ## Sequence and Video Behavior
 
@@ -293,7 +324,9 @@ What is cached:
 - Ultralytics writable settings/config under the cache directory
 - versioned cache data under the selected cache root in a `v2` namespace
 
-When compact cache archives are enabled, result masks are stored as cropped, bit-packed per-frame archives instead of full-frame raster `.npy` files.
+Saved projects keep their own sidecar cache root. Unsaved sessions continue using the default cache directory.
+
+Result masks are stored as cropped, bit-packed per-frame archives instead of full-frame raster `.npy` files.
 
 When inference downscale is enabled, SAM 3 runs on the reduced frame size for speed and memory savings, while exports and overlays are restored to the original source dimensions.
 
@@ -342,6 +375,18 @@ C:\Users\jeffr\.conda\envs\ultralytics\python.exe -c "import torch; print(torch.
 Use `Clear Cache` in the GUI, or delete the configured cache directory manually.
 
 ## Changelog
+
+### 2026-04-02
+
+- Added GUI project save/load support with `New Project`, `Open Project`, `Save Project`, and `Save Project As`.
+- Added per-project sidecar caches so saved sessions reopen with their own cached masks and results.
+- Added explicit cache-clear confirmation for the active project cache or current unsaved-session cache.
+- Removed the compact-cache checkbox and made compact bit-packed v2 archives the default and only cache write format.
+- Persisted frame position, prompts, manual masks, cached results, export settings, and per-frame view filters inside project files.
+- Added source-filename merged-mask export with a safety guard that blocks overwriting source imagery.
+- Improved cancel behavior so sequence runs stop scheduling further frames as soon as cancellation is requested.
+- Reduced GUI-side mask memory pressure by keeping preview/manual-mask arrays in `bool`/`uint8` paths and trimming unnecessary array copies.
+- Optimized hot render/update paths for lower RAM usage and faster large-frame interaction.
 
 ### 2026-03-27
 

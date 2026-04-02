@@ -28,6 +28,15 @@ def image_merged_mask_filename(source_name: str) -> str:
     return f"{source_name}_merged_mask.png"
 
 
+def source_image_filename(source) -> str | None:
+    """Return the original image filename when the source is a file-backed image."""
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        if path.suffix:
+            return path.name
+    return None
+
+
 def video_mask_filename(frame_index: int, object_index: int, track_id: int | None = None) -> str:
     """Return a deterministic video mask filename."""
     if track_id is not None:
@@ -44,7 +53,13 @@ def _write_png(path: Path, image: np.ndarray, *, overwrite: bool) -> None:
     if path.exists() and not overwrite:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(path), image):
+    params: list[int] = []
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        params = [cv2.IMWRITE_JPEG_QUALITY, 100]
+    elif suffix == ".webp":
+        params = [cv2.IMWRITE_WEBP_QUALITY, 100]
+    if not cv2.imwrite(str(path), image, params):
         raise ExportError(f"Failed to write image: {path}")
 
 
@@ -102,6 +117,19 @@ def _mask_to_png(
     return image
 
 
+def _mask_export_image(image: np.ndarray, *, source=None, preserve_source_filenames: bool = False) -> np.ndarray:
+    """Adapt binary mask output to better match source-image export expectations."""
+    if not preserve_source_filenames:
+        return image
+    if image.ndim != 2:
+        return image
+    if not isinstance(source, (str, Path)):
+        return image
+    # Preserve source-style raster compatibility for image-name exports by
+    # writing a 3-channel black/white image instead of a single-channel mask.
+    return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+
 def _result_manual_mask(result: PredictionResult, manual_masks_by_key: dict[str, object] | None) -> np.ndarray | None:
     if not manual_masks_by_key:
         return None
@@ -125,6 +153,7 @@ def _export_image_masks(
     invert_mask: bool,
     manual_mask: np.ndarray | None,
     dilation_pixels: int,
+    preserve_source_filenames: bool,
 ) -> tuple[list[str], dict[str, Any]]:
     export_paths: dict[str, Any] = {"masks": []}
     mask_paths: list[str] = []
@@ -135,10 +164,15 @@ def _export_image_masks(
     if merged_mask_only:
         merged = merged_mask(result, extra_masks=[manual_mask] if manual_mask is not None else None, shape=target_shape)
         if merged is not None:
-            merged_path = mask_dir / image_merged_mask_filename(base_name)
+            merged_name = source_image_filename(result.source) if preserve_source_filenames else None
+            merged_path = mask_dir / (merged_name or image_merged_mask_filename(base_name))
             _write_png(
                 merged_path,
-                _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+                _mask_export_image(
+                    _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+                    source=result.source,
+                    preserve_source_filenames=preserve_source_filenames,
+                ),
                 overwrite=overwrite,
             )
             merged_path_str = str(merged_path)
@@ -151,7 +185,11 @@ def _export_image_masks(
         mask_path = mask_dir / image_mask_filename(base_name, obj.object_index, obj.track_id)
         _write_png(
             mask_path,
-            _mask_to_png(obj.mask, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+            _mask_export_image(
+                _mask_to_png(obj.mask, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+                source=result.source if preserve_source_filenames else None,
+                preserve_source_filenames=preserve_source_filenames,
+            ),
             overwrite=overwrite,
         )
         mask_path_str = str(mask_path)
@@ -161,10 +199,15 @@ def _export_image_masks(
     if save_merged_mask:
         merged = merged_mask(result, extra_masks=[manual_mask] if manual_mask is not None else None, shape=target_shape)
         if merged is not None:
-            merged_path = mask_dir / image_merged_mask_filename(base_name)
+            merged_name = source_image_filename(result.source) if preserve_source_filenames else None
+            merged_path = mask_dir / (merged_name or image_merged_mask_filename(base_name))
             _write_png(
                 merged_path,
-                _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+                _mask_export_image(
+                    _mask_to_png(merged, invert_mask=invert_mask, dilation_pixels=dilation_pixels, target_shape=target_shape),
+                    source=result.source,
+                    preserve_source_filenames=preserve_source_filenames,
+                ),
                 overwrite=overwrite,
             )
             export_paths["merged_mask"] = str(merged_path)
@@ -186,6 +229,7 @@ def _export_image_result(
     invert_mask: bool,
     manual_masks_by_key: dict[str, object] | None,
     dilation_pixels: int,
+    preserve_source_filenames: bool,
     progress_callback=None,
     progress_index: int = 1,
     progress_total: int = 1,
@@ -211,6 +255,7 @@ def _export_image_result(
         invert_mask=invert_mask,
         manual_mask=manual_mask,
         dilation_pixels=dilation_pixels,
+        preserve_source_filenames=preserve_source_filenames,
     )
 
     if output_dir is not None and base_image is not None:
@@ -261,6 +306,7 @@ def _export_image_batch_results(
     invert_mask: bool,
     manual_masks_by_key: dict[str, object] | None,
     dilation_pixels: int,
+    preserve_source_filenames: bool,
     progress_callback=None,
 ) -> dict[str, Any]:
     aggregate: dict[str, Any] = {"items": [], "masks": []}
@@ -279,6 +325,7 @@ def _export_image_batch_results(
             invert_mask=invert_mask,
             manual_masks_by_key=manual_masks_by_key,
             dilation_pixels=dilation_pixels,
+            preserve_source_filenames=preserve_source_filenames,
             progress_callback=progress_callback,
             progress_index=index,
             progress_total=total,
@@ -413,6 +460,7 @@ def save_results(
     invert_mask: bool = False,
     manual_masks_by_key: dict[str, object] | None = None,
     dilation_pixels: int = 0,
+    preserve_source_filenames: bool = False,
     progress_callback=None,
 ) -> dict[str, Any]:
     """Export normalized results to PNG, JSON, and video outputs."""
@@ -433,6 +481,7 @@ def save_results(
             invert_mask=invert_mask,
             manual_masks_by_key=manual_masks_by_key,
             dilation_pixels=dilation_pixels,
+            preserve_source_filenames=preserve_source_filenames,
             progress_callback=progress_callback,
         )
     if not results:
@@ -451,6 +500,7 @@ def save_results(
             invert_mask=invert_mask,
             manual_masks_by_key=manual_masks_by_key,
             dilation_pixels=dilation_pixels,
+            preserve_source_filenames=preserve_source_filenames,
             progress_callback=progress_callback,
         )
     return _export_video_results(

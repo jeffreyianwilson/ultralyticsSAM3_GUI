@@ -47,7 +47,7 @@ def render_overlay(
         tint = np.zeros_like(canvas)
         for obj in objects:
             color = color_for_index(obj.object_index)
-            mask = _normalize_union_mask(obj.mask, tuple(canvas.shape[:2])).astype(bool, copy=False)
+            mask = _normalize_union_mask(obj.mask, tuple(canvas.shape[:2]))
             tint[mask] = color
         canvas = cv2.addWeighted(tint, opacity, canvas, 1.0 - opacity, 0.0)
 
@@ -82,15 +82,16 @@ def _normalize_union_mask(mask: np.ndarray, shape: tuple[int, int] | None = None
     array = np.asarray(mask)
     if array.ndim == 3:
         if array.shape[0] <= 4 and array.shape[1:] != array.shape[:2]:
-            array = np.any(array > 0, axis=0)
+            union = np.any(array, axis=0)
         else:
-            array = np.any(array > 0, axis=-1)
+            union = np.any(array, axis=-1)
     else:
-        array = array > 0
-    union = array.astype(np.uint8)
+        union = array if array.dtype == np.bool_ else (array > 0)
+    if union.dtype != np.bool_:
+        union = union > 0
     if shape is not None and tuple(union.shape[:2]) != tuple(shape):
-        union = cv2.resize(union, (int(shape[1]), int(shape[0])), interpolation=cv2.INTER_NEAREST)
-        union = (union > 0).astype(np.uint8)
+        resized = cv2.resize(union.astype(np.uint8, copy=False), (int(shape[1]), int(shape[0])), interpolation=cv2.INTER_NEAREST)
+        return resized > 0
     return union
 
 
@@ -114,11 +115,11 @@ def merged_mask(
     if reference_shape is None:
         return None
 
-    union = np.zeros(reference_shape, dtype=np.uint8)
+    union = np.zeros(reference_shape, dtype=np.bool_)
     for obj in result.objects:
         union |= _normalize_union_mask(obj.mask, reference_shape)
     if result.prompt_mask is not None:
         union |= _normalize_union_mask(result.prompt_mask, reference_shape)
     for mask in extra_masks or []:
         union |= _normalize_union_mask(mask, reference_shape)
-    return union * 255
+    return union.astype(np.uint8, copy=False) * 255
