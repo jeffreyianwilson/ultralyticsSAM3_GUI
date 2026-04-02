@@ -201,6 +201,50 @@ def load_cached_mask(mask_ref: object) -> np.ndarray | None:
     return np.asarray(mask_ref)
 
 
+def load_cached_result(result_ref: str | Path) -> PredictionResult:
+    """Resolve cached result references from compact archive paths."""
+    path = Path(result_ref)
+    if not path.exists():
+        raise FileNotFoundError(f"Cached result does not exist: {path}")
+    if path.suffix.lower() != ".npz":
+        raise ValueError(f"Unsupported cached result path: {path}")
+    record = _load_archive_record(path)
+    if record.metadata.get("type") != "result":
+        raise ValueError(f"Unsupported cached archive type for result loading: {path}")
+    metadata = record.metadata
+    objects: list[SegmentationObject] = []
+    for index, item in enumerate(metadata.get("objects", [])):
+        box = item.get("box")
+        objects.append(
+            SegmentationObject(
+                mask=ArchiveMaskArray(path, "object", index=index),
+                box=None if box is None else tuple(float(value) for value in box),
+                score=None if item.get("score") is None else float(item.get("score")),
+                label=item.get("label"),
+                track_id=None if item.get("track_id") is None else int(item.get("track_id")),
+                object_index=int(item.get("index", index + 1)),
+            )
+        )
+    prompt_mask = None
+    if int(metadata.get("prompt_mask_count", 0)) > 0:
+        prompt_mask = ArchiveMaskArray(path, "prompt")
+    image_size = metadata.get("image_size")
+    inference_image_size = metadata.get("inference_image_size")
+    return PredictionResult(
+        source=metadata.get("source"),
+        frame_index=metadata.get("frame_index"),
+        mode=str(metadata.get("mode") or "image"),
+        image_size=None if image_size is None else (int(image_size[0]), int(image_size[1])),
+        inference_image_size=None if inference_image_size is None else (int(inference_image_size[0]), int(inference_image_size[1])),
+        objects=objects,
+        prompt_metadata=dict(metadata.get("prompt_metadata") or {}),
+        tracking_metadata=dict(metadata.get("tracking_metadata") or {}),
+        timings={str(key): float(value) for key, value in dict(metadata.get("timings") or {}).items()},
+        image=None,
+        prompt_mask=prompt_mask,
+    )
+
+
 class DiskMaskArray:
     """Lazy disk-backed mask wrapper for legacy .npy masks."""
 
@@ -277,8 +321,6 @@ class CacheStore:
     """Manage a writable cache directory for GUI state."""
 
     root: Path
-    compact_archives: bool = True
-
     @classmethod
     def create(cls, root: str | Path) -> "CacheStore":
         store = cls(Path(root))
@@ -440,61 +482,12 @@ class CacheStore:
         target_dir = self.mask_dir / namespace
         target_dir.mkdir(parents=True, exist_ok=True)
         token = self._safe_token(key)
-        if self.compact_archives:
-            target = target_dir / f"{token}.npz"
-            return self._write_mask_archive(target, np.asarray(array))
-
-        target = target_dir / f"{token}.npy"
-        np.save(target, _cache_mask_array(array), allow_pickle=False)
-        return str(target)
+        target = target_dir / f"{token}.npz"
+        return self._write_mask_archive(target, np.asarray(array))
 
     def write_result(self, namespace: str, key: str, result: PredictionResult) -> PredictionResult:
         target_dir = self.result_dir / namespace
         target_dir.mkdir(parents=True, exist_ok=True)
         token = self._safe_token(key)
-        if self.compact_archives:
-            target = target_dir / f"{token}.npz"
-            return self._write_result_archive(target, result)
-
-        target_dir = target_dir / token
-        target_dir.mkdir(parents=True, exist_ok=True)
-        cached_objects: list[SegmentationObject] = []
-        for obj in result.objects:
-            mask_path = target_dir / f"object_{obj.object_index:03d}.npy"
-            np.save(mask_path, _cache_mask_array(obj.mask), allow_pickle=False)
-            cached_objects.append(
-                SegmentationObject(
-                    mask=DiskMaskArray(mask_path),
-                    box=obj.box,
-                    score=obj.score,
-                    label=obj.label,
-                    track_id=obj.track_id,
-                    object_index=obj.object_index,
-                )
-            )
-        prompt_mask = None
-        if result.prompt_mask is not None:
-            prompt_mask_path = target_dir / "prompt_mask.npy"
-            np.save(prompt_mask_path, _cache_mask_array(result.prompt_mask), allow_pickle=False)
-            prompt_mask = DiskMaskArray(prompt_mask_path)
-        image = None
-        if result.image is not None:
-            if result.mode == "video" and result.source and Path(str(result.source)).exists():
-                image = None
-            elif result.source and Path(str(result.source)).exists():
-                image = None
-            else:
-                image = np.asarray(result.image).copy()
-        return PredictionResult(
-            source=result.source,
-            frame_index=result.frame_index,
-            mode=result.mode,
-            image_size=result.image_size,
-            inference_image_size=result.inference_image_size,
-            objects=cached_objects,
-            prompt_metadata=dict(result.prompt_metadata),
-            tracking_metadata=dict(result.tracking_metadata),
-            timings=dict(result.timings),
-            image=image,
-            prompt_mask=prompt_mask,
-        )
+        target = target_dir / f"{token}.npz"
+        return self._write_result_archive(target, result)

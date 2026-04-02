@@ -89,7 +89,7 @@ def to_bgr_image(source: ImageSource) -> np.ndarray:
             raise InvalidSourceError("NumPy image sources must have shape HxW, HxWx3, or HxWx4.")
         elif image.shape[2] == 4:
             image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
-        return np.asarray(image).copy()
+        return np.asarray(image)
     if isinstance(source, Image.Image):
         rgb = np.asarray(source.convert("RGB"))
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -198,11 +198,11 @@ def preview_mask(mask_input: np.ndarray | None) -> np.ndarray | None:
     """Collapse a normalized mask prompt into a single preview mask."""
     if mask_input is None:
         return None
-    array = np.asarray(mask_input, dtype=np.float32)
+    array = np.asarray(mask_input)
     if array.ndim == 2:
-        return np.clip(array, 0.0, 1.0)
+        return array if array.dtype == np.bool_ else (array > 0)
     if array.ndim == 3:
-        return np.clip(array.max(axis=0), 0.0, 1.0)
+        return np.any(array, axis=0) if array.dtype == np.bool_ else np.any(array > 0, axis=0)
     raise InvalidSourceError("Preview masks must be a 2D mask or 3D stack of masks.")
 
 

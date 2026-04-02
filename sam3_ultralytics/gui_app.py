@@ -9,11 +9,22 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .backend import SAM3Ultralytics
-from .cache_store import CacheStore, load_cached_mask
+from .cache_store import ArchiveMaskArray, CacheStore, load_cached_mask, load_cached_result
 from .gui_state import GUIState, ViewFilterState
 from .gui_widgets import PreviewCanvas
 from .gui_workers import BackendTask
 from .io_utils import list_image_directory, normalize_mask_input, preview_mask, read_video_frame, to_bgr_image, video_frame_count
+from .exceptions import InferenceCancelledError
+from .project_io import (
+    PROJECT_SUFFIX,
+    decode_path,
+    decode_view_filter_state,
+    encode_path,
+    encode_view_filter_state,
+    load_project_document,
+    project_cache_dir,
+    save_project_document,
+)
 from .schemas import PredictionResult, SegmentationObject
 from .visualization import render_overlay
 
@@ -23,11 +34,13 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("sam3_ultralytics")
+        self._base_window_title = "sam3_ultralytics"
+        self.setWindowTitle(self._base_window_title)
         self.resize(1320, 860)
         self._initial_maximize_pending = True
+        self.default_cache_root = Path.cwd() / ".sam3_cache"
         self.state = GUIState()
-        self.cache_store = CacheStore.create(Path.cwd() / ".sam3_cache")
+        self.cache_store = CacheStore.create(self.default_cache_root)
         self.backend: SAM3Ultralytics | None = None
         self._backend_signature: tuple | None = None
         self.current_task: BackendTask | None = None
@@ -42,6 +55,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.thread_pool.setMaxThreadCount(1)
         self.thread_pool.setExpiryTimeout(-1)
         self._run_cache_epoch = 0
+        self._suspend_dirty_tracking = False
         self.play_timer = QtCore.QTimer(self)
         self.play_timer.setInterval(180)
         self.play_timer.timeout.connect(self._advance_playback)
@@ -53,6 +67,16 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._apply_defaults()
 
     def _build_ui(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+        self.new_project_action = file_menu.addAction("New Project")
+        self.new_project_action.setShortcut(QtGui.QKeySequence.StandardKey.New)
+        self.open_project_action = file_menu.addAction("Open Project...")
+        self.open_project_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        self.save_project_action = file_menu.addAction("Save Project")
+        self.save_project_action.setShortcut(QtGui.QKeySequence.StandardKey.Save)
+        self.save_project_as_action = file_menu.addAction("Save Project As...")
+        self.save_project_as_action.setShortcut(QtGui.QKeySequence.StandardKey.SaveAs)
+
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
         root_layout = QtWidgets.QHBoxLayout(central)
@@ -102,9 +126,6 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         cache_row.addWidget(self.cache_dir_edit)
         cache_row.addWidget(self.cache_browse_button)
         form.addRow("Cache", cache_row)
-        self.compact_cache_checkbox = QtWidgets.QCheckBox("Use compact cache archives (recommended)")
-        self.compact_cache_checkbox.setChecked(True)
-        form.addRow("", self.compact_cache_checkbox)
         self.clear_cache_button = QtWidgets.QPushButton("Clear Cache")
         form.addRow("", self.clear_cache_button)
         controls_layout.addLayout(form)
@@ -380,6 +401,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         view_layout.addLayout(export_dir_row)
         self.auto_export_masks_checkbox = QtWidgets.QCheckBox("Auto-export masks after inference")
         self.merge_masks_only_checkbox = QtWidgets.QCheckBox("Export merged masks only")
+        self.preserve_source_filename_checkbox = QtWidgets.QCheckBox("Use original source filename for merged masks")
         self.invert_mask_export_checkbox = QtWidgets.QCheckBox("Invert exported masks")
         self.export_filtered_view_checkbox = QtWidgets.QCheckBox("Export only masks visible in View")
         self.export_filtered_view_checkbox.setChecked(True)
@@ -390,6 +412,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.export_masks_button = QtWidgets.QPushButton("Export Masks")
         view_layout.addWidget(self.auto_export_masks_checkbox)
         view_layout.addWidget(self.merge_masks_only_checkbox)
+        view_layout.addWidget(self.preserve_source_filename_checkbox)
         view_layout.addWidget(self.invert_mask_export_checkbox)
         view_layout.addWidget(self.export_filtered_view_checkbox)
         view_layout.addWidget(QtWidgets.QLabel("Mask Dilation (px)"))
@@ -416,11 +439,9 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
 
         action_row = QtWidgets.QHBoxLayout()
         self.run_button = QtWidgets.QPushButton("Run")
-        self.clear_masks_button = QtWidgets.QPushButton("Clear Masks")
         self.cancel_button = QtWidgets.QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
         action_row.addWidget(self.run_button)
-        action_row.addWidget(self.clear_masks_button)
         action_row.addWidget(self.cancel_button)
         controls_layout.addLayout(action_row)
 
@@ -474,10 +495,13 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.statusBar().hide()
         splitter.setSizes([380, 1200])
 
+        self.new_project_action.triggered.connect(self._new_project)
+        self.open_project_action.triggered.connect(self._open_project)
+        self.save_project_action.triggered.connect(self._save_project)
+        self.save_project_as_action.triggered.connect(self._save_project_as)
         self.model_browse_button.clicked.connect(self._browse_model)
         self.cache_browse_button.clicked.connect(self._browse_cache_dir)
         self.clear_cache_button.clicked.connect(self._clear_cache_dir)
-        self.compact_cache_checkbox.toggled.connect(self._set_compact_cache_mode)
         self.downscale_inference_checkbox.toggled.connect(self._toggle_inference_scale)
         self.open_image_button.clicked.connect(self._open_image)
         self.open_directory_button.clicked.connect(self._open_directory)
@@ -489,7 +513,6 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.export_dir_browse_button.clicked.connect(self._browse_export_dir)
         self.export_masks_button.clicked.connect(self._export_masks_only)
         self.run_button.clicked.connect(self._run_inference)
-        self.clear_masks_button.clicked.connect(self._clear_masks_only)
         self.cancel_button.clicked.connect(self._cancel_task)
         self.clear_prompts_button.clicked.connect(self._clear_prompts)
         self.clear_all_button.clicked.connect(self._clear_all)
@@ -525,12 +548,28 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         toolbox.currentChanged.connect(lambda _index: self._update_left_panel_layout())
         splitter.splitterMoved.connect(lambda _pos, _index: self._update_left_panel_layout())
 
+        self.model_combo.currentTextChanged.connect(lambda _value: self._mark_project_dirty())
+        self.device_combo.currentTextChanged.connect(lambda _value: self._mark_project_dirty())
+        self.run_scope_combo.currentIndexChanged.connect(lambda _index: self._mark_project_dirty())
+        self.confidence_spin.valueChanged.connect(lambda _value: self._mark_project_dirty())
+        self.downscale_inference_checkbox.toggled.connect(lambda _checked: self._mark_project_dirty())
+        self.inference_scale_spin.valueChanged.connect(lambda _value: self._mark_project_dirty())
+        self.text_prompt_edit.textChanged.connect(lambda _text: self._mark_project_dirty())
+        self.append_inference_checkbox.toggled.connect(lambda _checked: self._mark_project_dirty())
+        self.export_dir_edit.textChanged.connect(lambda _text: self._mark_project_dirty())
+        self.auto_export_masks_checkbox.toggled.connect(lambda _checked: self._mark_project_dirty())
+        self.merge_masks_only_checkbox.toggled.connect(lambda _checked: self._mark_project_dirty())
+        self.preserve_source_filename_checkbox.toggled.connect(lambda _checked: self._mark_project_dirty())
+        self.invert_mask_export_checkbox.toggled.connect(lambda _checked: self._mark_project_dirty())
+        self.export_filtered_view_checkbox.toggled.connect(lambda _checked: self._mark_project_dirty())
+        self.export_dilation_spin.valueChanged.connect(lambda _value: self._mark_project_dirty())
+
     def _apply_defaults(self) -> None:
         self.model_combo.addItem(r"D:\cache\models\sam3.pt")
         self.state.cache_dir = str(self.cache_store.root)
-        self.state.compact_cache_enabled = self.cache_store.compact_archives
         self.cache_dir_edit.setText(str(self.cache_store.root))
-        self.compact_cache_checkbox.setChecked(self.state.compact_cache_enabled)
+        self.cache_dir_edit.setReadOnly(False)
+        self.cache_browse_button.setEnabled(True)
         self.state.inference_scale_enabled = False
         self.state.inference_scale = 1.0
         self.downscale_inference_checkbox.setChecked(False)
@@ -540,10 +579,81 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._refresh_view_filters()
         self._reset_progress()
         self._set_result_summary("No inference results yet.")
+        self._update_window_title()
         QtCore.QTimer.singleShot(0, self._update_left_panel_layout)
 
     def _set_result_summary(self, text: str) -> None:
         self.metadata_panel.setPlainText(text)
+
+    def _project_display_name(self) -> str:
+        return self.state.project_name or "Unsaved Session"
+
+    def _update_window_title(self) -> None:
+        suffix = self._project_display_name()
+        dirty = "*" if self.state.dirty else ""
+        self.setWindowTitle(f"{self._base_window_title} - {suffix}{dirty}")
+
+    def _mark_project_dirty(self) -> None:
+        if self._suspend_dirty_tracking:
+            return
+        if not self.state.dirty:
+            self.state.dirty = True
+            self._update_window_title()
+
+    def _mark_project_clean(self) -> None:
+        self.state.dirty = False
+        self._update_window_title()
+
+    def _project_cache_root(self, project_path: str | Path) -> Path:
+        return project_cache_dir(project_path)
+
+    @staticmethod
+    def _project_name_from_path(project_path: str | Path) -> str:
+        name = Path(project_path).name
+        if name.endswith(PROJECT_SUFFIX):
+            return name[: -len(PROJECT_SUFFIX)]
+        return Path(project_path).stem
+
+    @staticmethod
+    def _normalize_project_save_path(path: str) -> Path:
+        candidate = Path(path)
+        if candidate.suffix:
+            return candidate
+        return candidate.with_name(f"{candidate.name}{PROJECT_SUFFIX}")
+
+    def _set_project_cache_mode(self, active: bool) -> None:
+        self.cache_dir_edit.setReadOnly(active)
+        self.cache_browse_button.setEnabled(not active)
+
+    def _has_active_project(self) -> bool:
+        return bool(self.state.project_path)
+
+    def _busy_for_project_action(self) -> bool:
+        if self.current_task is None:
+            return False
+        QtWidgets.QMessageBox.warning(self, "Busy", "Wait for the current task to finish before changing projects.")
+        return True
+
+    def _confirm_discard_unsaved_changes(self) -> bool:
+        if not self.state.dirty:
+            return True
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Unsaved Changes")
+        dialog.setText(f"Save changes to {self._project_display_name()} before continuing?")
+        save_button = dialog.addButton("Save", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        discard_button = dialog.addButton("Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = dialog.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(save_button)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is cancel_button:
+            return False
+        if clicked is discard_button:
+            return True
+        if clicked is save_button:
+            return self._save_project()
+        return True
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
@@ -555,6 +665,12 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._update_left_panel_layout()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if not self._confirm_discard_unsaved_changes():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _iter_result_objects(self):
         result = self._current_result()
@@ -581,7 +697,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             area = max(0.0, (x2 - x1) * (y2 - y1))
             return (center_x, center_y, area, obj.object_index)
         mask = np.asarray(obj.mask)
-        ys, xs = np.where(mask > 0)
+        ys, xs = np.where(mask if mask.dtype == np.bool_ else (mask > 0))
         if ys.size:
             return (float(xs.mean()), float(ys.mean()), float(mask.sum()), obj.object_index)
         return (0.0, 0.0, 0.0, obj.object_index)
@@ -1041,6 +1157,44 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             filtered[frame_key] = mask_ref
         return filtered or None
 
+    @staticmethod
+    def _iter_export_result_items(results) -> list[PredictionResult]:
+        if isinstance(results, list):
+            return [item for item in results if isinstance(item, PredictionResult)]
+        if isinstance(results, PredictionResult):
+            return [results]
+        return []
+
+    def _export_would_overwrite_source_imagery(self, export_dir: str | Path, results=None) -> bool:
+        if not self.preserve_source_filename_checkbox.isChecked():
+            return False
+        try:
+            target_dir = Path(export_dir).resolve()
+        except OSError:
+            return False
+        candidate_results = self._iter_export_result_items(results)
+        if candidate_results:
+            for result in candidate_results:
+                if result.mode != "image" or not isinstance(result.source, str):
+                    continue
+                source_path = Path(result.source)
+                if source_path.suffix and source_path.parent.resolve() == target_dir:
+                    return True
+            return False
+        if self.state.source_kind == "image" and self.state.source_path:
+            source_path = Path(self.state.source_path)
+            return bool(source_path.suffix and source_path.parent.resolve() == target_dir)
+        if self.state.source_kind == "directory" and self.state.source_path:
+            return Path(self.state.source_path).resolve() == target_dir
+        return False
+
+    def _warn_source_overwrite_export(self) -> None:
+        QtWidgets.QMessageBox.warning(
+            self,
+            "Export Cancelled",
+            "Masks cannot overwrite source imagery. Choose a different export directory or disable original source filenames.",
+        )
+
     def _refresh_view_filters(self) -> None:
         result = self._current_frame_result()
         frame_key = self._result_frame_key(result) if result is not None else self._current_source_key()
@@ -1307,18 +1461,21 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._refresh_view_filters()
         self._update_result_panel()
         self._refresh_preview()
+        self._mark_project_dirty()
 
     def _handle_id_filter_change(self, item: QtWidgets.QListWidgetItem) -> None:
         self._apply_filter_change("id", item)
         self._refresh_view_filters()
         self._update_result_panel()
         self._refresh_preview()
+        self._mark_project_dirty()
 
     def _handle_instance_filter_change(self, item: QtWidgets.QListWidgetItem) -> None:
         self._apply_filter_change("instance", item)
         self._refresh_view_filters()
         self._update_result_panel()
         self._refresh_preview()
+        self._mark_project_dirty()
 
     def _append_log(self, message: str) -> None:
         self.result_panel.appendPlainText(message)
@@ -1366,6 +1523,18 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         if self.current_task is not None:
             QtWidgets.QMessageBox.warning(self, "Busy", "Wait for the current task to finish before clearing the cache.")
             return
+        scope_label = "the current unsaved session" if not self._has_active_project() else f"project '{self._project_display_name()}'"
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Clear Cache")
+        dialog.setText(f"This will completely clear the cache for {scope_label}.")
+        dialog.setInformativeText("This cannot be undone.")
+        continue_button = dialog.addButton("Continue", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = dialog.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel_button)
+        dialog.exec()
+        if dialog.clickedButton() is not continue_button:
+            return
         self.cache_store.clear()
         self.backend = None
         self._backend_signature = None
@@ -1374,19 +1543,6 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.cache_dir_edit.setText(self.state.cache_dir)
         self.statusBar().showMessage(f"Cleared cache: {self.cache_store.root}")
         self._append_log(f"Cleared cache directory: {self.cache_store.root}")
-
-    def _set_compact_cache_mode(self, checked: bool) -> None:
-        if self.current_task is not None:
-            self.compact_cache_checkbox.blockSignals(True)
-            self.compact_cache_checkbox.setChecked(self.cache_store.compact_archives)
-            self.compact_cache_checkbox.blockSignals(False)
-            QtWidgets.QMessageBox.warning(self, "Busy", "Wait for the current task to finish before changing cache layout.")
-            return
-        self.cache_store.compact_archives = bool(checked)
-        self.state.compact_cache_enabled = bool(checked)
-        mode_text = "compact cache archives enabled" if checked else "legacy cache layout enabled"
-        self.statusBar().showMessage(mode_text)
-        self._append_log(mode_text)
 
     def _toggle_inference_scale(self, checked: bool) -> None:
         self.state.inference_scale_enabled = bool(checked)
@@ -1404,15 +1560,18 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         return self.state.inference_scale
 
     def _switch_cache_dir(self, path: str) -> None:
+        if self._has_active_project():
+            QtWidgets.QMessageBox.warning(self, "Project Cache", "Saved projects always use their sidecar cache directory.")
+            return
         self.cache_store.set_root(path)
         self.backend = None
         self._backend_signature = None
         self._clear_all()
         self.state.cache_dir = str(self.cache_store.root)
-        self.state.compact_cache_enabled = self.cache_store.compact_archives
         self.cache_dir_edit.setText(self.state.cache_dir)
         self.statusBar().showMessage(f"Using cache: {self.cache_store.root}")
         self._append_log(f"Using cache directory: {self.cache_store.root}")
+        self._mark_project_dirty()
 
     def _current_source_key(self, index: int | None = None) -> str | None:
         if self.state.source_kind == "directory":
@@ -1449,7 +1608,12 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         mask = load_cached_mask(mask_ref)
         if mask is None:
             return None
-        return np.asarray(mask, dtype=np.float32)
+        array = np.asarray(mask)
+        if array.dtype == np.bool_:
+            return array
+        if np.issubdtype(array.dtype, np.floating):
+            return array > 0.5
+        return array > 0
 
     def _cache_prompt_mask(self, key: str, mask: object) -> tuple[str, np.ndarray]:
         array = self._load_cached_mask(mask)
@@ -1482,6 +1646,374 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             return cached_results
         key = f"{self._cache_token(results.source)}_{results.frame_index if results.frame_index is not None else 'single'}"
         return self._cache_result(results, key)
+
+    @staticmethod
+    def _serialize_path_mapping(mapping: dict[str, str], base_dir: Path) -> dict[str, dict]:
+        return {
+            key: encoded
+            for key, value in mapping.items()
+            if (encoded := encode_path(value, base_dir=base_dir)) is not None
+        }
+
+    @staticmethod
+    def _deserialize_path_mapping(mapping: dict[str, dict] | None, base_dir: Path) -> dict[str, str]:
+        if not mapping:
+            return {}
+        return {
+            key: decoded
+            for key, value in mapping.items()
+            if (decoded := decode_path(value, base_dir=base_dir)) is not None
+        }
+
+    def _result_cache_ref(self, result: PredictionResult | None) -> str | None:
+        if result is None:
+            return None
+        for obj in result.objects:
+            mask = obj.mask
+            if isinstance(mask, ArchiveMaskArray):
+                return str(mask.path)
+        prompt_mask = result.prompt_mask
+        if isinstance(prompt_mask, ArchiveMaskArray):
+            return str(prompt_mask.path)
+        return None
+
+    def _serialize_result_refs(self, results, base_dir: Path):
+        if results is None:
+            return None
+        if isinstance(results, list):
+            payload: list[dict | None] = []
+            for result in results:
+                encoded = encode_path(self._result_cache_ref(result), base_dir=base_dir) if result is not None else None
+                payload.append(encoded)
+            return payload
+        return encode_path(self._result_cache_ref(results), base_dir=base_dir)
+
+    def _deserialize_result_refs(self, payload, base_dir: Path):
+        missing: list[str] = []
+
+        def load_one(item):
+            path = decode_path(item, base_dir=base_dir)
+            if not path:
+                return None
+            if not Path(path).exists():
+                missing.append(path)
+                return None
+            return load_cached_result(path)
+
+        if payload is None:
+            return None, missing
+        if isinstance(payload, list):
+            return [load_one(item) for item in payload], missing
+        return load_one(payload), missing
+
+    def _clone_cache_assets_to_store(self, store: CacheStore) -> None:
+        prompt_refs: dict[str, str] = {}
+        for key, ref in list(self.state.mask_inputs_by_key.items()):
+            mask = self._load_cached_mask(ref)
+            if mask is None:
+                continue
+            prompt_refs[key] = store.write_mask("prompt", key, mask)
+        self.state.mask_inputs_by_key = prompt_refs
+
+        manual_refs: dict[str, str] = {}
+        for key, ref in list(self.state.manual_masks_by_key.items()):
+            mask = self._load_cached_mask(ref)
+            if mask is None:
+                continue
+            manual_refs[key] = store.write_mask("manual", key, mask)
+        self.state.manual_masks_by_key = manual_refs
+
+        def migrate_result(result: PredictionResult | None, index: int) -> PredictionResult | None:
+            if result is None:
+                return None
+            key = f"{self._cache_token(result.source)}_{result.frame_index if result.frame_index is not None else index}"
+            return store.write_result("inference", key, result)
+
+        if isinstance(self.state.results, list):
+            self.state.results = [migrate_result(result, index) for index, result in enumerate(self.state.results)]
+        elif isinstance(self.state.results, PredictionResult):
+            self.state.results = migrate_result(self.state.results, 0)
+
+    def _build_project_payload(self, project_path: Path) -> dict:
+        base_dir = project_path.parent
+        return {
+            "project": {
+                "name": self._project_name_from_path(project_path),
+                "cache_dir": encode_path(str(self.cache_store.root), base_dir=base_dir),
+            },
+            "runtime": {
+                "model_path": self.model_combo.currentText().strip() or None,
+                "device": self.device_combo.currentText(),
+                "run_scope": self.run_scope_combo.currentData() or "current",
+                "confidence": float(self.confidence_spin.value()),
+                "inference_scale_enabled": bool(self.downscale_inference_checkbox.isChecked()),
+                "inference_scale": float(self.inference_scale_spin.value()),
+                "text_prompt": self.text_prompt_edit.text(),
+                "append_inferred_masks": bool(self.append_inference_checkbox.isChecked()),
+                "export_dir": encode_path(self.export_dir_edit.text().strip() or None, base_dir=base_dir),
+                "auto_export_masks": bool(self.auto_export_masks_checkbox.isChecked()),
+                "merge_masks_only": bool(self.merge_masks_only_checkbox.isChecked()),
+                "preserve_source_filenames": bool(self.preserve_source_filename_checkbox.isChecked()),
+                "invert_exported_masks": bool(self.invert_mask_export_checkbox.isChecked()),
+                "export_visible_only": bool(self.export_filtered_view_checkbox.isChecked()),
+                "mask_dilation": int(self.export_dilation_spin.value()),
+                "overlay_opacity": int(self.opacity_slider.value()),
+                "show_labels": bool(self.show_labels_checkbox.isChecked()),
+                "show_masks": bool(self.show_masks_checkbox.isChecked()),
+                "show_track_ids": bool(self.show_track_ids_checkbox.isChecked()),
+                "manual_brush_px": int(self.brush_slider.value()),
+            },
+            "source": {
+                "kind": self.state.source_kind,
+                "path": encode_path(self.state.source_path, base_dir=base_dir),
+                "current_frame_index": int(self._current_source_index()),
+            },
+            "session": {
+                "source_frame_count": self.state.source_frame_count,
+                "mask_paths_by_key": self._serialize_path_mapping(self.state.mask_paths_by_key, base_dir),
+                "mask_inputs_by_key": self._serialize_path_mapping(self.state.mask_inputs_by_key, base_dir),
+                "mask_sources_by_key": self._serialize_path_mapping(self.state.mask_sources_by_key, base_dir),
+                "mask_ids_by_key": {key: int(value) for key, value in self.state.mask_ids_by_key.items()},
+                "mask_classes_by_key": dict(self.state.mask_classes_by_key),
+                "manual_masks_by_key": self._serialize_path_mapping(self.state.manual_masks_by_key, base_dir),
+                "points_by_key": {key: [list(item) for item in value] for key, value in self.state.points_by_key.items()},
+                "boxes_by_key": {key: [list(item) for item in value] for key, value in self.state.boxes_by_key.items()},
+                "next_mask_id": int(self.state.next_mask_id),
+                "results": self._serialize_result_refs(self.state.results, base_dir),
+                "suppressed_objects_by_key": {key: sorted(value) for key, value in self.state.suppressed_objects_by_key.items()},
+                "suppressed_track_ids_by_source": {key: sorted(int(item) for item in value) for key, value in self.state.suppressed_track_ids_by_source.items()},
+                "view_filters_by_frame": {key: encode_view_filter_state(value) for key, value in self.state.view_filters_by_frame.items()},
+            },
+        }
+
+    def _restore_project_payload(self, payload: dict, project_path: Path) -> None:
+        base_dir = project_path.parent
+        runtime = dict(payload.get("runtime") or {})
+        source = dict(payload.get("source") or {})
+        session = dict(payload.get("session") or {})
+        project_section = dict(payload.get("project") or {})
+
+        self._suspend_dirty_tracking = True
+        try:
+            model_path = runtime.get("model_path")
+            if model_path:
+                if self.model_combo.findText(str(model_path)) == -1:
+                    self.model_combo.addItem(str(model_path))
+                self.model_combo.setCurrentText(str(model_path))
+            device = runtime.get("device")
+            if device:
+                self.device_combo.setCurrentText(str(device))
+            run_scope = runtime.get("run_scope", "current")
+            run_index = max(self.run_scope_combo.findData(run_scope), 0)
+            self.run_scope_combo.setCurrentIndex(run_index)
+            self.confidence_spin.setValue(float(runtime.get("confidence", 0.25)))
+            self.downscale_inference_checkbox.setChecked(bool(runtime.get("inference_scale_enabled", False)))
+            self.inference_scale_spin.setValue(float(runtime.get("inference_scale", 1.0)))
+            self.text_prompt_edit.setText(str(runtime.get("text_prompt") or ""))
+            self.append_inference_checkbox.setChecked(bool(runtime.get("append_inferred_masks", False)))
+            self.export_dir_edit.setText(decode_path(runtime.get("export_dir"), base_dir=base_dir) or "")
+            self.auto_export_masks_checkbox.setChecked(bool(runtime.get("auto_export_masks", False)))
+            self.merge_masks_only_checkbox.setChecked(bool(runtime.get("merge_masks_only", False)))
+            self.preserve_source_filename_checkbox.setChecked(bool(runtime.get("preserve_source_filenames", False)))
+            self.invert_mask_export_checkbox.setChecked(bool(runtime.get("invert_exported_masks", False)))
+            self.export_filtered_view_checkbox.setChecked(bool(runtime.get("export_visible_only", False)))
+            self.export_dilation_spin.setValue(int(runtime.get("mask_dilation", 0)))
+            self.opacity_slider.setValue(int(runtime.get("overlay_opacity", 45)))
+            self.show_labels_checkbox.setChecked(bool(runtime.get("show_labels", True)))
+            self.show_masks_checkbox.setChecked(bool(runtime.get("show_masks", True)))
+            self.show_track_ids_checkbox.setChecked(bool(runtime.get("show_track_ids", True)))
+            self.brush_slider.setValue(int(runtime.get("manual_brush_px", self.brush_slider.value())))
+
+            source_path = decode_path(source.get("path"), base_dir=base_dir)
+            source_kind = str(source.get("kind") or "image")
+            if source_path:
+                if source_kind == "directory":
+                    self._load_directory_path(source_path)
+                elif source_kind == "video":
+                    self._load_video_path(source_path)
+                else:
+                    self._load_image_path(source_path)
+            else:
+                self._clear_all()
+
+            self.state.mask_paths_by_key = self._deserialize_path_mapping(session.get("mask_paths_by_key"), base_dir)
+            self.state.mask_inputs_by_key = self._deserialize_path_mapping(session.get("mask_inputs_by_key"), base_dir)
+            self.state.mask_sources_by_key = self._deserialize_path_mapping(session.get("mask_sources_by_key"), base_dir)
+            self.state.mask_ids_by_key = {key: int(value) for key, value in dict(session.get("mask_ids_by_key") or {}).items()}
+            self.state.mask_classes_by_key = {key: str(value) for key, value in dict(session.get("mask_classes_by_key") or {}).items()}
+            self.state.manual_masks_by_key = self._deserialize_path_mapping(session.get("manual_masks_by_key"), base_dir)
+            self.state.points_by_key = {
+                key: [tuple(item) for item in value]
+                for key, value in dict(session.get("points_by_key") or {}).items()
+            }
+            self.state.boxes_by_key = {
+                key: [tuple(item) for item in value]
+                for key, value in dict(session.get("boxes_by_key") or {}).items()
+            }
+            self.state.next_mask_id = int(session.get("next_mask_id", 1))
+            self.state.suppressed_objects_by_key = {
+                key: set(str(item) for item in value)
+                for key, value in dict(session.get("suppressed_objects_by_key") or {}).items()
+            }
+            self.state.suppressed_track_ids_by_source = {
+                key: {int(item) for item in value}
+                for key, value in dict(session.get("suppressed_track_ids_by_source") or {}).items()
+            }
+            self.state.view_filters_by_frame = {
+                key: decode_view_filter_state(value)
+                for key, value in dict(session.get("view_filters_by_frame") or {}).items()
+            }
+            self.state.results, missing_results = self._deserialize_result_refs(session.get("results"), base_dir)
+            missing_assets = [path for mapping in [self.state.mask_inputs_by_key, self.state.manual_masks_by_key] for path in mapping.values() if not Path(path).exists()]
+            missing_assets.extend(missing_results)
+            if missing_assets:
+                self._append_log(f"Project opened with missing cache assets: {len(missing_assets)}")
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Missing Cache Assets",
+                    f"Some cached project assets were missing and could not be restored.\n\nMissing files: {len(missing_assets)}",
+                )
+
+            self.state.project_path = str(project_path)
+            self.state.project_cache_dir = decode_path(project_section.get("cache_dir"), base_dir=base_dir) or str(self._project_cache_root(project_path))
+            self.state.project_name = project_section.get("name") or self._project_name_from_path(project_path)
+            self.state.cache_dir = str(self.cache_store.root)
+            frame_index = int(source.get("current_frame_index", 0))
+            self._configure_playback()
+            if self._playback_count() > 0:
+                self.seek_slider.setValue(max(0, min(frame_index, self._playback_count() - 1)))
+            self._sync_current_mask_state()
+            self._refresh_view_filters()
+            self._update_result_panel()
+            self._refresh_preview()
+        finally:
+            self._suspend_dirty_tracking = False
+        self._mark_project_clean()
+        self._set_project_cache_mode(True)
+        self.cache_dir_edit.setText(str(self.cache_store.root))
+        self._append_log(f"Opened project: {project_path}")
+
+    def _reset_session(self) -> None:
+        self._suspend_dirty_tracking = True
+        try:
+            self.state = GUIState()
+            self.state.cache_dir = str(self.cache_store.root)
+            self.backend = None
+            self._backend_signature = None
+            self.preview_timer.stop()
+            self.play_timer.stop()
+            self.text_prompt_edit.clear()
+            self.mask_class_edit.clear()
+            self.mask_id_edit.clear()
+            self.export_dir_edit.clear()
+            self.append_inference_checkbox.setChecked(False)
+            self.auto_export_masks_checkbox.setChecked(False)
+            self.merge_masks_only_checkbox.setChecked(False)
+            self.preserve_source_filename_checkbox.setChecked(False)
+            self.invert_mask_export_checkbox.setChecked(False)
+            self.export_filtered_view_checkbox.setChecked(False)
+            self.export_dilation_spin.setValue(0)
+            self.opacity_slider.setValue(45)
+            self.show_labels_checkbox.setChecked(True)
+            self.show_masks_checkbox.setChecked(True)
+            self.show_track_ids_checkbox.setChecked(True)
+            self.downscale_inference_checkbox.setChecked(False)
+            self.inference_scale_spin.setValue(1.0)
+            self.run_scope_combo.setCurrentIndex(max(self.run_scope_combo.findData("current"), 0))
+            self.confidence_spin.setValue(0.25)
+            self.preview_canvas.clear()
+            self.preview_canvas.set_prompt_overlays([], [])
+            self.preview_canvas.set_prompt_mask_preview(None)
+            self.preview_canvas.set_manual_mask_preview(None)
+            self._manual_mask_clipboard = None
+            self._sequence_run_context = None
+            self._reset_result_view()
+            self._configure_playback()
+            self._set_result_summary("No inference results yet.")
+            self._clear_log("Project reset")
+            self._set_project_cache_mode(False)
+            self.cache_dir_edit.setText(str(self.cache_store.root))
+        finally:
+            self._suspend_dirty_tracking = False
+        self._mark_project_clean()
+
+    def _save_project(self) -> bool:
+        if self._busy_for_project_action():
+            return False
+        if not self.state.project_path:
+            return self._save_project_as()
+        project_path = Path(self.state.project_path)
+        project_cache = self._project_cache_root(project_path)
+        if str(project_cache) != str(self.cache_store.root):
+            target_store = CacheStore.create(project_cache)
+            self._clone_cache_assets_to_store(target_store)
+            self.cache_store = target_store
+            self.backend = None
+            self._backend_signature = None
+            self.cache_dir_edit.setText(str(self.cache_store.root))
+        payload = self._build_project_payload(project_path)
+        save_project_document(project_path, payload)
+        self.state.project_cache_dir = str(project_cache)
+        self.state.project_name = self._project_name_from_path(project_path)
+        self.state.cache_dir = str(self.cache_store.root)
+        self._mark_project_clean()
+        self._set_project_cache_mode(True)
+        self._append_log(f"Saved project: {project_path}")
+        return True
+
+    def _save_project_as(self) -> bool:
+        if self._busy_for_project_action():
+            return False
+        suggested = self.state.project_path or str(Path(self.state.source_path).with_name(f"{Path(self.state.source_path).stem}{PROJECT_SUFFIX}") if self.state.source_path else Path.cwd() / f"session{PROJECT_SUFFIX}")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Project As", suggested, "SAM3 Project (*.sam3proj.json)")
+        if not path:
+            return False
+        project_path = self._normalize_project_save_path(path)
+        project_cache = self._project_cache_root(project_path)
+        target_store = CacheStore.create(project_cache)
+        self._clone_cache_assets_to_store(target_store)
+        self.cache_store = target_store
+        self.backend = None
+        self._backend_signature = None
+        self.state.project_path = str(project_path)
+        self.state.project_cache_dir = str(project_cache)
+        self.state.project_name = self._project_name_from_path(project_path)
+        self.state.cache_dir = str(self.cache_store.root)
+        self.cache_dir_edit.setText(str(self.cache_store.root))
+        save_project_document(project_path, self._build_project_payload(project_path))
+        self._mark_project_clean()
+        self._set_project_cache_mode(True)
+        self._append_log(f"Saved project: {project_path}")
+        return True
+
+    def _open_project(self) -> None:
+        if self._busy_for_project_action():
+            return
+        if not self._confirm_discard_unsaved_changes():
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Project", str(Path.cwd()), "SAM3 Project (*.sam3proj.json)")
+        if not path:
+            return
+        try:
+            project_path = Path(path)
+            payload = load_project_document(project_path)
+            project_cache = self._project_cache_root(project_path)
+            self.cache_store = CacheStore.create(project_cache)
+            self.backend = None
+            self._backend_signature = None
+            self.cache_dir_edit.setText(str(self.cache_store.root))
+            self._restore_project_payload(payload, project_path)
+        except Exception:
+            QtWidgets.QMessageBox.critical(self, "Project Error", traceback.format_exc())
+
+    def _new_project(self) -> None:
+        if self._busy_for_project_action():
+            return
+        if not self._confirm_discard_unsaved_changes():
+            return
+        self.cache_store = CacheStore.create(self.default_cache_root)
+        self._reset_session()
+        self._append_log("Started new project session")
 
     def _store_current_prompt_target(self) -> bool:
         key = self._current_source_key()
@@ -1518,6 +2050,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         if id_value is not None:
             self.state.next_mask_id = max(self.state.next_mask_id, int(id_value) + 1)
         self._refresh_view_filters()
+        self._mark_project_dirty()
         return True
 
     def _sync_current_mask_state(self) -> None:
@@ -1625,6 +2158,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._clear_log(f"Loaded image: {path}")
         self._configure_playback()
         self._sync_current_mask_state()
+        self._mark_project_dirty()
 
     def _load_directory_path(self, path: str) -> None:
         files = [str(item) for item in list_image_directory(path)]
@@ -1641,6 +2175,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._clear_log(f"Loaded folder: {path}\nImages: {len(files)}")
         self._configure_playback()
         self._sync_current_mask_state()
+        self._mark_project_dirty()
 
     def _load_video_path(self, path: str) -> None:
         self._clear_source_prompts()
@@ -1656,6 +2191,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._clear_log(f"Loaded video: {path}")
         self._configure_playback()
         self._sync_current_mask_state()
+        self._mark_project_dirty()
 
     def _open_image(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)")
@@ -1693,6 +2229,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._refresh_view_filters()
         self._append_log(f"Loaded mask: {path} (id={mask_id})")
         self._refresh_preview()
+        self._mark_project_dirty()
 
     def _open_mask(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Mask", "", "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)")
@@ -1742,6 +2279,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._refresh_view_filters()
         self.preview_canvas.set_manual_mask_preview(self._current_manual_mask_preview())
         self._append_log(f"Updated manualMask id 0 for current view ({non_zero} px)")
+        self._mark_project_dirty()
 
     def _clear_current_manual_mask(self) -> None:
         key = self._current_source_key()
@@ -1753,14 +2291,15 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._refresh_view_filters()
         self._refresh_preview()
         self._append_log("Cleared manualMask id 0 for current view")
+        self._mark_project_dirty()
 
     def _copy_manual_mask_to_clipboard(self) -> None:
         if self.state.manual_mask_input is None:
             QtWidgets.QMessageBox.warning(self, "No Manual Mask", "Create a manual mask first.")
             return
-        mask = np.asarray(self.state.manual_mask_input, dtype=np.float32).copy()
+        mask = np.asarray(self.state.manual_mask_input, dtype=np.bool_).copy()
         self._manual_mask_clipboard = mask
-        uint8_mask = (np.clip(mask, 0.0, 1.0) * 255).astype(np.uint8)
+        uint8_mask = mask.astype(np.uint8, copy=False) * 255
         height, width = uint8_mask.shape
         qimage = QtGui.QImage(uint8_mask.data, width, height, width, QtGui.QImage.Format.Format_Grayscale8).copy()
         QtWidgets.QApplication.clipboard().setImage(qimage)
@@ -1770,7 +2309,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
     def _paste_manual_mask_to_current_frame(self) -> None:
         mask = None
         if self._manual_mask_clipboard is not None:
-            mask = np.asarray(self._manual_mask_clipboard, dtype=np.float32).copy()
+            mask = np.asarray(self._manual_mask_clipboard, dtype=np.bool_).copy()
         else:
             qimage = QtWidgets.QApplication.clipboard().image()
             if not qimage.isNull():
@@ -1779,7 +2318,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 height = gray.height()
                 bits = gray.bits()
                 array = np.frombuffer(bits, dtype=np.uint8, count=gray.bytesPerLine() * height).reshape((height, gray.bytesPerLine()))
-                mask = (array[:, :width] > 0).astype(np.float32)
+                mask = array[:, :width] > 0
         if mask is None:
             QtWidgets.QMessageBox.warning(self, "Clipboard Empty", "No manual mask is available in the clipboard.")
             return
@@ -1798,7 +2337,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             targets = [self._current_source_key(index) for index in range(int(self.state.source_frame_count)) if self._current_source_key(index)]
         elif self._current_source_key() is not None:
             targets = [self._current_source_key()]
-        mask = np.asarray(self.state.manual_mask_input, dtype=np.float32).copy()
+        mask = np.asarray(self.state.manual_mask_input, dtype=np.bool_).copy()
         total = len(targets)
         for index, key in enumerate(targets, start=1):
             if key is not None:
@@ -1808,6 +2347,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._refresh_view_filters()
         self._refresh_preview()
         self._append_log(f"Copied manualMask id 0 to {len(targets)} frame(s)")
+        self._mark_project_dirty()
 
     def _copy_manual_mask_to_range(self) -> None:
         if self.state.manual_mask_input is None:
@@ -1838,7 +2378,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             self._append_log("No neighboring frames in selected range; nothing copied.")
             return
 
-        mask = np.asarray(self.state.manual_mask_input, dtype=np.float32).copy()
+        mask = np.asarray(self.state.manual_mask_input, dtype=np.bool_).copy()
         total = len(target_indices)
         for item_index, frame_index in enumerate(target_indices, start=1):
             key = self._current_source_key(frame_index)
@@ -1854,6 +2394,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             f"Copied manualMask id 0 to {len(target_indices)} frame(s) around current "
             f"({self._playback_label_prefix()} {current_index + 1})"
         )
+        self._mark_project_dirty()
 
     def _clear_mask(self, reset_label: bool = True, *, update_preview: bool = True) -> None:
         key = self._current_source_key()
@@ -1879,6 +2420,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._update_prompt_summary()
         if update_preview:
             self._refresh_preview()
+        self._mark_project_dirty()
+        self._mark_project_dirty()
 
     def _clear_masks_only(self) -> None:
         self._clear_all_masks()
@@ -1890,12 +2433,16 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._configure_playback()
         self.statusBar().showMessage("Cleared all masks and mask results")
         self._append_log("Cleared all masks and mask results")
+        self._mark_project_dirty()
+        self._mark_project_dirty()
 
     def _browse_export_dir(self) -> None:
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Export Directory", self.export_dir_edit.text() or str(Path.cwd()))
         if path:
             self.state.export_dir = path
             self.export_dir_edit.setText(path)
+            self._mark_project_dirty()
+            self._mark_project_dirty()
 
     def _set_tool(self, tool: str) -> None:
         mapping = {
@@ -1924,6 +2471,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.preview_canvas.set_prompt_overlays(self.state.points, self.state.boxes)
         self._update_prompt_summary()
         self._refresh_preview()
+        self._mark_project_dirty()
+        self._mark_project_dirty()
 
     def _clear_all(self) -> None:
         self.text_prompt_edit.clear()
@@ -1947,6 +2496,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         else:
             self.preview_canvas.clear()
         self._configure_playback()
+        self._mark_project_dirty()
+        self._mark_project_dirty()
 
     def _add_point(self, x: float, y: float, label: int) -> None:
         if not self._ensure_prompt_target_assignment():
@@ -1958,6 +2509,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.preview_canvas.set_prompt_overlays(self.state.points, self.state.boxes)
         self._update_prompt_summary()
         self._schedule_interaction_preview("point prompt")
+        self._mark_project_dirty()
 
     def _add_box(self, x1: float, y1: float, x2: float, y2: float, label: int) -> None:
         if not self._ensure_prompt_target_assignment():
@@ -1969,6 +2521,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.preview_canvas.set_prompt_overlays(self.state.points, self.state.boxes)
         self._update_prompt_summary()
         self._schedule_interaction_preview("box prompt")
+        self._mark_project_dirty()
 
     def _update_prompt_summary(self) -> None:
         suffixes = []
@@ -2167,10 +2720,20 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             backend = self._create_backend()
             self.backend = backend
             if self.state.source_kind == "image":
-                return backend.predict_image(self.state.source_path, inference_scale=inference_scale, **prompt_kwargs)
+                return backend.predict_image(
+                    self.state.source_path,
+                    inference_scale=inference_scale,
+                    cancel_callback=cancel_callback,
+                    **prompt_kwargs,
+                )
             if self.state.source_kind == "directory":
                 source = self.state.source_items[min(current_index, len(self.state.source_items) - 1)]
-                return backend.predict_image(source, inference_scale=inference_scale, **prompt_kwargs)
+                return backend.predict_image(
+                    source,
+                    inference_scale=inference_scale,
+                    cancel_callback=cancel_callback,
+                    **prompt_kwargs,
+                )
             results = backend.predict_video_frames(
                 self.state.source_path,
                 frame_indices=[current_index],
@@ -2183,6 +2746,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.current_task_mode = "preview"
         self.current_task.signals.result.connect(self._handle_preview_result)
         self.current_task.signals.error.connect(self._handle_preview_error)
+        self.current_task.signals.cancelled.connect(self._handle_cancelled)
         self.current_task.signals.finished.connect(self._task_finished)
         self.run_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
@@ -2203,6 +2767,10 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._run_cache_epoch += 1
         export_dir = self.export_dir_edit.text().strip() or None
         auto_export_dir = export_dir if self.auto_export_masks_checkbox.isChecked() else None
+        if auto_export_dir and self._export_would_overwrite_source_imagery(auto_export_dir):
+            self._warn_source_overwrite_export()
+            return
+        preserve_source_filenames = self.preserve_source_filename_checkbox.isChecked()
         merged_mask_only = self.merge_masks_only_checkbox.isChecked()
         invert_mask = self.invert_mask_export_checkbox.isChecked()
         run_scope = self.run_scope_combo.currentData() or "current"
@@ -2244,6 +2812,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 auto_export_dir=auto_export_dir,
                 merged_mask_only=merged_mask_only,
                 invert_mask=invert_mask,
+                preserve_source_filenames=preserve_source_filenames,
                 base_text_prompt=base_text_prompt,
                 first_sequence_text=first_sequence_text,
                 first_sequence_mask=first_sequence_mask,
@@ -2271,6 +2840,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     merged_mask_only=merged_mask_only,
                     invert_mask=invert_mask,
                     inference_scale=inference_scale,
+                    preserve_source_filenames=preserve_source_filenames,
+                    cancel_callback=cancel_callback,
                     **prompt_kwargs,
                 )
             if self.state.source_kind == "directory":
@@ -2283,6 +2854,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                         merged_mask_only=merged_mask_only,
                         invert_mask=invert_mask,
                         inference_scale=inference_scale,
+                        preserve_source_filenames=preserve_source_filenames,
+                        cancel_callback=cancel_callback,
                         **prompt_kwargs,
                     )
                 if first_sequence_mask is not None and progress_callback is not None:
@@ -2305,6 +2878,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     output_dir=None,
                     merged_mask_only=merged_mask_only,
                     invert_mask=invert_mask,
+                    preserve_source_filenames=preserve_source_filenames,
                     progress_callback=progress_callback,
                     cancel_callback=cancel_callback,
                     item_start_callback=item_start_callback,
@@ -2319,6 +2893,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     output_dir=export_dir if auto_export_dir else None,
                     merged_mask_only=merged_mask_only,
                     invert_mask=invert_mask,
+                    preserve_source_filenames=preserve_source_filenames,
                     progress_callback=progress_callback,
                     cancel_callback=cancel_callback,
                     item_start_callback=item_start_callback,
@@ -2344,6 +2919,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     output_dir=export_dir if auto_export_dir else None,
                     merged_mask_only=merged_mask_only,
                     invert_mask=invert_mask,
+                    preserve_source_filenames=preserve_source_filenames,
                     progress_callback=progress_callback,
                     cancel_callback=cancel_callback,
                     item_start_callback=item_start_callback,
@@ -2362,6 +2938,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 output_dir=export_dir if auto_export_dir else None,
                 merged_mask_only=merged_mask_only,
                 invert_mask=invert_mask,
+                preserve_source_filenames=preserve_source_filenames,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
                 item_start_callback=item_start_callback,
@@ -2375,6 +2952,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._streaming_batch_total = total_hint if streaming_batch_run else 0
         self.current_task.signals.result.connect(self._handle_result)
         self.current_task.signals.error.connect(self._handle_error)
+        self.current_task.signals.cancelled.connect(self._handle_cancelled)
         self.current_task.signals.finished.connect(self._task_finished)
         self.current_task.signals.progress.connect(self._handle_progress)
         if streaming_batch_run:
@@ -2405,6 +2983,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         auto_export_dir,
         merged_mask_only: bool,
         invert_mask: bool,
+        preserve_source_filenames: bool,
         base_text_prompt,
         first_sequence_text,
         first_sequence_mask,
@@ -2456,7 +3035,9 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             "auto_export_dir": auto_export_dir,
             "merged_mask_only": merged_mask_only,
             "invert_mask": invert_mask,
+            "preserve_source_filenames": preserve_source_filenames,
             "error": None,
+            "cancelled": False,
         }
         self.current_task_mode = "run"
         self._streaming_batch_mode = True
@@ -2480,6 +3061,9 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
     def _launch_next_sequence_item(self) -> None:
         context = self._sequence_run_context
         if context is None:
+            return
+        if context.get("cancelled"):
+            self._handle_cancelled("Inference cancelled.")
             return
         index = int(context.get("next_index", 0))
         total = int(context.get("total", 0))
@@ -2506,6 +3090,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     mask_id=context["mask_id"],
                     mask_label=context["mask_label"],
                     inference_scale=context["inference_scale"],
+                    preserve_source_filenames=context["preserve_source_filenames"],
+                    cancel_callback=cancel_callback,
                 )
 
             frame_index = int(context["items"][index])
@@ -2524,6 +3110,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                     mask_id=context["mask_id"],
                     mask_label=context["mask_label"],
                     inference_scale=context["inference_scale"],
+                    preserve_source_filenames=context["preserve_source_filenames"],
                     cancel_callback=cancel_callback,
                 )
                 return results[0] if results else None
@@ -2537,6 +3124,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 mask_id=context["mask_id"],
                 mask_label=context["mask_label"],
                 inference_scale=context["inference_scale"],
+                preserve_source_filenames=context["preserve_source_filenames"],
                 cancel_callback=cancel_callback,
             )
             return results[0] if results else None
@@ -2544,6 +3132,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.current_task = BackendTask(job)
         self.current_task.signals.result.connect(lambda result, i=index, lab=str(label): self._handle_sequence_item_result(i, total, lab, result))
         self.current_task.signals.error.connect(self._handle_sequence_item_error)
+        self.current_task.signals.cancelled.connect(self._handle_cancelled)
         self.thread_pool.start(self.current_task)
 
     def _handle_sequence_item_result(self, index: int, total: int, label: str, result) -> None:
@@ -2551,11 +3140,14 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         if context is None:
             return
         self.current_task = None
+        if context.get("cancelled"):
+            self._handle_cancelled("Inference cancelled.")
+            return
         self._handle_batch_item_result(index, total, result, label)
         if result is not None and context.get("propagate_sequence_mask"):
             next_mask = result.prompt_mask if result.prompt_mask is not None else self.backend._first_object_mask(result)
             if next_mask is not None:
-                context["sequence_mask"] = np.asarray(next_mask, dtype=np.float32).copy()
+                context["sequence_mask"] = np.asarray(next_mask) > 0
         if isinstance(self.state.results, list):
             context["results"] = list(self.state.results)
         context["next_index"] = index + 1
@@ -2595,10 +3187,34 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._streaming_batch_total = 0
 
     def _cancel_task(self) -> None:
+        if self._sequence_run_context is not None:
+            self._sequence_run_context["cancelled"] = True
         if self.current_task is not None:
             self.current_task.cancel()
             self.statusBar().showMessage("Cancellation requested...")
             self._append_log("Cancellation requested")
+
+    def _handle_cancelled(self, message: str) -> None:
+        self.current_task = None
+        self.current_task_mode = None
+        self._streaming_batch_mode = False
+        self._streaming_batch_total = 0
+        self.cancel_button.setEnabled(False)
+        self.run_button.setEnabled(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Cancelled")
+        self.statusBar().showMessage(message)
+        if self._sequence_run_context is not None:
+            context = self._sequence_run_context
+            if isinstance(context.get("results"), list):
+                self.state.results = context["results"]
+            self._sequence_run_context = None
+            self._configure_playback()
+            self._refresh_view_filters()
+            self._update_result_panel()
+            self._refresh_preview()
+        self._append_log(message)
 
     @staticmethod
     def _clone_segmentation_object(
@@ -2609,7 +3225,8 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
     ) -> SegmentationObject:
         mask = obj.mask
         if copy_mask:
-            mask = np.asarray(obj.mask).copy()
+            array = np.asarray(obj.mask)
+            mask = array.copy() if array.dtype == np.bool_ else (array > 0).copy()
         return SegmentationObject(
             mask=mask,
             box=obj.box,
@@ -2698,6 +3315,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._configure_playback()
         self._update_result_panel()
         self._refresh_preview()
+        self._mark_project_dirty()
 
     def _handle_batch_item_started(self, index: int, total: int, label: str) -> None:
         if total <= 0:
@@ -2734,6 +3352,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         if index + 1 < total:
             self._advance_batch_preview(index + 1)
+        self._mark_project_dirty()
 
     def _handle_preview_result(self, result) -> None:
         if result is None:
@@ -2757,6 +3376,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._configure_playback()
         self._update_result_panel()
         self._refresh_preview()
+        self._mark_project_dirty()
 
     def _handle_preview_error(self, message: str) -> None:
         self._append_log("Interactive preview failed")
@@ -2884,6 +3504,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._refresh_view_filters()
         self._update_result_panel()
         self._refresh_preview()
+        self._mark_project_dirty()
 
     def _current_mask_preview(self):
         if self.state.mask_input is None or not self._mask_visible_for_filters():
@@ -3000,6 +3621,9 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         export_results = self._results_for_export(apply_view_filters=apply_view_filters)
         if isinstance(export_results, list):
             export_results = [item for item in export_results if item is not None]
+        if self._export_would_overwrite_source_imagery(export_dir, export_results):
+            self._warn_source_overwrite_export()
+            return
         export_manual_masks = self._manual_masks_for_export(apply_view_filters=apply_view_filters)
 
         def job(progress_callback=None, cancel_callback=None):
@@ -3015,6 +3639,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
                 invert_mask=self.invert_mask_export_checkbox.isChecked(),
                 manual_masks_by_key=export_manual_masks,
                 dilation_pixels=int(self.export_dilation_spin.value()),
+                preserve_source_filenames=self.preserve_source_filename_checkbox.isChecked(),
                 progress_callback=progress_callback,
             )
 
@@ -3022,6 +3647,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.current_task_mode = "export"
         self.current_task.signals.result.connect(lambda result: self._handle_export_result(result, export_dir))
         self.current_task.signals.error.connect(self._handle_export_error)
+        self.current_task.signals.cancelled.connect(self._handle_cancelled)
         self.current_task.signals.finished.connect(self._task_finished)
         self.current_task.signals.progress.connect(self._handle_progress)
         self.run_button.setEnabled(False)
