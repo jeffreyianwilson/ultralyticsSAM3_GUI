@@ -139,7 +139,10 @@ def _assign_tracking_identity(
             "active_track_ids": [track_id],
         }
     )
-    return np.asarray(tracked_obj.mask, dtype=np.float32).copy(), float(tracked_iou), used_fallback
+    tracked_mask = _binary_mask(tracked_obj.mask)
+    if tracked_mask is not None:
+        tracked_mask = np.array(tracked_mask, dtype=np.bool_, copy=True)
+    return tracked_mask, float(tracked_iou), used_fallback
 
 
 def _resolve_per_frame_value(mapping: dict | None, key, fallback):
@@ -194,7 +197,9 @@ def track_image_sequence(
 ) -> list[PredictionResult]:
     """Track a mask-initialized object across an image sequence."""
     expanded_sources = expand_sources(sources)
-    tracked_mask = None if mask_input is None else np.asarray(mask_input, dtype=np.float32).copy()
+    tracked_mask = _binary_mask(mask_input)
+    if tracked_mask is not None:
+        tracked_mask = np.array(tracked_mask, dtype=np.bool_, copy=True)
     resolved_track_id = int(mask_id or 1)
     resolved_mask_label = _resolve_text(text_prompt, mask_label)
     results: list[PredictionResult] = []
@@ -211,7 +216,9 @@ def track_image_sequence(
         frame_boxes = _resolve_per_frame_value(boxes_by_source, source_key, boxes)
         frame_text_prompt = _resolve_text(_resolve_per_frame_value(text_prompts_by_source, source_key, text_prompt), None)
         override_mask = _resolve_per_frame_value(mask_inputs, source_key, None)
-        current_mask = tracked_mask if override_mask is None else np.asarray(override_mask, dtype=np.float32).copy()
+        current_mask = tracked_mask if override_mask is None else _binary_mask(override_mask)
+        if current_mask is not None and current_mask is not tracked_mask:
+            current_mask = np.array(current_mask, dtype=np.bool_, copy=True)
         inference_source, scaled_points, scaled_boxes, scaled_mask_input, transform = prepare_inference_source(
             source,
             points=frame_points,
@@ -257,7 +264,7 @@ def track_image_sequence(
             fallback_allowed=current_mask is not None,
         )
         if tracked_mask is not None:
-            result.prompt_mask = np.asarray(tracked_mask, dtype=np.float32).copy()
+            result.prompt_mask = np.array(tracked_mask, dtype=np.bool_, copy=True)
         result.prompt_metadata.setdefault("mask_input", {})
         if isinstance(result.prompt_metadata["mask_input"], dict):
             result.prompt_metadata["mask_input"]["id"] = resolved_track_id
@@ -302,7 +309,9 @@ def track_video_frames(
     if frame_indices is None:
         total_frames = video_frame_count(source)
         frame_indices = list(range(total_frames or 0))
-    tracked_mask = None if mask_input is None else np.asarray(mask_input, dtype=np.float32).copy()
+    tracked_mask = _binary_mask(mask_input)
+    if tracked_mask is not None:
+        tracked_mask = np.array(tracked_mask, dtype=np.bool_, copy=True)
     resolved_track_id = int(mask_id or 1)
     resolved_mask_label = _resolve_text(text_prompt, mask_label)
     results: list[PredictionResult] = []
@@ -321,7 +330,9 @@ def track_video_frames(
         frame_boxes = _resolve_per_frame_value(boxes_by_frame, frame_index, boxes)
         frame_text_prompt = _resolve_text(_resolve_per_frame_value(text_prompts_by_frame, frame_index, text_prompt), None)
         override_mask = _resolve_per_frame_value(mask_inputs_by_frame, frame_index, None)
-        current_mask = tracked_mask if override_mask is None else np.asarray(override_mask, dtype=np.float32).copy()
+        current_mask = tracked_mask if override_mask is None else _binary_mask(override_mask)
+        if current_mask is not None and current_mask is not tracked_mask:
+            current_mask = np.array(current_mask, dtype=np.bool_, copy=True)
         inference_source, scaled_points, scaled_boxes, scaled_mask_input, transform = prepare_inference_source(
             frame,
             points=frame_points,
@@ -370,7 +381,7 @@ def track_video_frames(
             fallback_allowed=current_mask is not None,
         )
         if tracked_mask is not None:
-            result.prompt_mask = np.asarray(tracked_mask, dtype=np.float32).copy()
+            result.prompt_mask = np.array(tracked_mask, dtype=np.bool_, copy=True)
         result.prompt_metadata.setdefault("mask_input", {})
         if isinstance(result.prompt_metadata["mask_input"], dict):
             result.prompt_metadata["mask_input"]["id"] = resolved_track_id

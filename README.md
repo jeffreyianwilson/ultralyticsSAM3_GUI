@@ -27,6 +27,8 @@ This application was entirely written by AI, it is strongly recommended to revie
 - Cache-backed mask and result storage
 - Save/loadable GUI project sessions with per-project sidecar caches
 - Reusable loaded model instance across runs for lower overhead
+- Folder/video runs optimized to reuse loaded model state and reduce redundant preview/render work
+- Per-frame processing times in the run log during streamed sequence inference
 
 ## Current Issues
 
@@ -375,6 +377,14 @@ C:\Users\jeffr\.conda\envs\ultralytics\python.exe -c "import torch; print(torch.
 Use `Clear Cache` in the GUI, or delete the configured cache directory manually.
 
 ## Changelog
+
+### 2026-04-09
+
+- Optimized folder/video throughput by reducing repeated full-mask `float32` conversions in sequence and tracking flows.
+- Added cached frame and overlay reuse in the GUI preview path to avoid redundant image reloads and overlay recomputation during long runs.
+- Removed duplicate streamed-run refresh work so each processed item performs fewer filter and preview updates.
+- Reduced additional array-copy pressure in cache and inference-scaling paths.
+- Added per-frame processing times to streamed `Processed ...` log entries during sequence inference.
 
 ### 2026-04-02
 

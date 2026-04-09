@@ -128,7 +128,7 @@ def apply_inference_transform(result, transform: InferenceTransform | None, *, s
         result.source = str(source)
         result.image = None
     elif transform.original_image is not None:
-        result.image = np.asarray(transform.original_image).copy()
+        result.image = np.asarray(transform.original_image)
     result.prompt_metadata["inference_scale"] = float(transform.scale_x)
     result.prompt_metadata["inference_image_size"] = list(transform.inference_size)
     return result

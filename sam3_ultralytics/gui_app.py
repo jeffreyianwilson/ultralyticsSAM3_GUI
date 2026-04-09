@@ -49,6 +49,10 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._streaming_batch_total = 0
         self._sequence_run_context: dict | None = None
         self._manual_mask_clipboard: np.ndarray | None = None
+        self._preview_frame_cache_key: object | None = None
+        self._preview_frame_cache_image: np.ndarray | None = None
+        self._preview_overlay_cache_key: object | None = None
+        self._preview_overlay_cache_image: np.ndarray | None = None
         # Use a dedicated single-thread pool so backend/model access does not
         # hop across worker threads between sequence items.
         self.thread_pool = QtCore.QThreadPool(self)
@@ -1485,6 +1489,29 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Idle")
 
+    @staticmethod
+    def _format_processing_time_ms(value: float | None) -> str | None:
+        if value is None:
+            return None
+        milliseconds = float(value)
+        if milliseconds >= 1000.0:
+            return f"{milliseconds / 1000.0:.2f}s"
+        return f"{milliseconds:.1f}ms"
+
+    def _result_processing_time_label(self, result: PredictionResult | None) -> str | None:
+        if result is None:
+            return None
+        timings = dict(result.timings or {})
+        total_ms = timings.get("backend_total_ms")
+        if total_ms is None:
+            components = [timings.get(name) for name in ("preprocess", "inference", "postprocess")]
+            if any(component is not None for component in components):
+                total_ms = sum(float(component or 0.0) for component in components)
+        formatted = self._format_processing_time_ms(total_ms)
+        if formatted is None:
+            return None
+        return f" in {formatted}"
+
     def _update_progress(self, current: int, total: int, message: str) -> None:
         if total > 0:
             value = int(round((current / total) * 100.0))
@@ -1896,6 +1923,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
     def _reset_session(self) -> None:
         self._suspend_dirty_tracking = True
         try:
+            self._invalidate_preview_caches()
             self.state = GUIState()
             self.state.cache_dir = str(self.cache_store.root)
             self.backend = None
@@ -2135,6 +2163,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._update_prompt_summary()
 
     def _reset_result_view(self) -> None:
+        self._invalidate_preview_caches()
         self.state.results = None
         self.state.suppressed_objects_by_key.clear()
         self.state.suppressed_track_ids_by_source.clear()
@@ -2475,6 +2504,7 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         self._mark_project_dirty()
 
     def _clear_all(self) -> None:
+        self._invalidate_preview_caches()
         self.text_prompt_edit.clear()
         self.state.points.clear()
         self.state.boxes.clear()
@@ -3151,7 +3181,11 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         if isinstance(self.state.results, list):
             context["results"] = list(self.state.results)
         context["next_index"] = index + 1
-        self._update_progress(index + 1, total, f"Processed {self._format_source_key_label(label)}")
+        timing_suffix = self._result_processing_time_label(result)
+        processed_message = f"Processed {self._format_source_key_label(label)}"
+        if timing_suffix:
+            processed_message += timing_suffix
+        self._update_progress(index + 1, total, processed_message)
         if context["next_index"] >= total:
             self._finalize_incremental_sequence_run()
             return
@@ -3346,7 +3380,6 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             self.state.results[index] = cached_incoming
         self.seek_slider.setValue(index)
         self.state.current_frame_index = index
-        self._refresh_view_filters()
         self._display_current_result()
         self._append_log(f"[{index + 1}/{total}] Loaded result for {self._format_source_key_label(label)}")
         QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
@@ -3516,39 +3549,106 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
             return None
         return preview_mask(self.state.manual_mask_input)
 
-    def _refresh_preview(self) -> None:
-        result = self._current_result()
-        if result is not None and not self._result_matches_current_view(result):
-            result = None
+    def _invalidate_preview_caches(self) -> None:
+        self._preview_frame_cache_key = None
+        self._preview_frame_cache_image = None
+        self._preview_overlay_cache_key = None
+        self._preview_overlay_cache_image = None
 
+    def _preview_frame_cache_key_for_result(self, result: PredictionResult | None) -> object | None:
         if result is not None:
-            filtered_result = self._filtered_result_copy(result, apply_view_filters=True)
+            if result.image is not None and (not result.source or not Path(str(result.source)).exists()):
+                return ("inline", result.source, result.frame_index, id(result.image))
+            if result.mode == "video" and self.state.source_path:
+                return ("video", str(self.state.source_path), int(result.frame_index or 0))
+            if result.source:
+                return ("image", str(result.source))
+        if self.state.source_kind == "video" and self.state.source_path:
+            return ("video", str(self.state.source_path), self._current_source_index())
+        if self.state.source_kind == "directory" and self.state.source_items:
+            current_index = min(self._current_source_index(), len(self.state.source_items) - 1)
+            return ("image", str(self.state.source_items[current_index]))
+        if self.state.source_path:
+            return ("image", str(self.state.source_path))
+        return None
+
+    def _resolve_preview_frame(self, result: PredictionResult | None) -> np.ndarray | None:
+        frame_key = self._preview_frame_cache_key_for_result(result)
+        if frame_key is not None and frame_key == self._preview_frame_cache_key and self._preview_frame_cache_image is not None:
+            return self._preview_frame_cache_image
+
+        frame = None
+        if result is not None:
             if result.image is not None:
                 frame = result.image
             elif self.state.source_kind == "video" and self.state.source_path:
                 frame = read_video_frame(self.state.source_path, result.frame_index or 0)
             elif result.source:
                 frame = to_bgr_image(result.source)
-            elif self.state.source_path and self.state.source_kind != "video":
-                frame = to_bgr_image(self.state.source_path)
-            else:
-                return
-            overlay = render_overlay(
-                frame,
-                filtered_result,
-                opacity=self.opacity_slider.value() / 100.0,
-                show_labels=self.show_labels_checkbox.isChecked(),
-                show_masks=self.show_masks_checkbox.isChecked() or self._has_active_view_filters(),
-                show_track_ids=self.show_track_ids_checkbox.isChecked(),
-            )
-            self.preview_canvas.set_image(overlay)
         elif self.state.source_kind == "video" and self.state.source_path:
-            self.preview_canvas.set_image(read_video_frame(self.state.source_path, self._current_source_index()))
+            frame = read_video_frame(self.state.source_path, self._current_source_index())
         elif self.state.source_kind == "directory" and self.state.source_items:
             current_index = min(self._current_source_index(), len(self.state.source_items) - 1)
-            self.preview_canvas.set_image(to_bgr_image(self.state.source_items[current_index]))
+            frame = to_bgr_image(self.state.source_items[current_index])
         elif self.state.source_path:
-            self.preview_canvas.set_image(to_bgr_image(self.state.source_path))
+            frame = to_bgr_image(self.state.source_path)
+
+        self._preview_frame_cache_key = frame_key
+        self._preview_frame_cache_image = None if frame is None else np.asarray(frame)
+        return self._preview_frame_cache_image
+
+    def _preview_overlay_cache_signature(
+        self,
+        result: PredictionResult,
+        visible_objects: list[SegmentationObject],
+        *,
+        show_masks: bool,
+    ) -> tuple[object, ...]:
+        result_ref = self._result_cache_ref(result) or ("live", id(result))
+        object_keys = tuple(self._object_instance_key(result, obj) for obj in visible_objects)
+        return (
+            self._preview_frame_cache_key_for_result(result),
+            result_ref,
+            id(result),
+            object_keys,
+            round(self.opacity_slider.value() / 100.0, 4),
+            self.show_labels_checkbox.isChecked(),
+            bool(show_masks),
+            self.show_track_ids_checkbox.isChecked(),
+        )
+
+    def _refresh_preview(self) -> None:
+        result = self._current_result()
+        if result is not None and not self._result_matches_current_view(result):
+            result = None
+
+        frame = self._resolve_preview_frame(result)
+        if frame is None:
+            return
+
+        if result is not None:
+            visible_objects = self._result_objects(result, apply_filters=True, include_suppressed=False)
+            show_masks = self.show_masks_checkbox.isChecked() or self._has_active_view_filters()
+            overlay_key = self._preview_overlay_cache_signature(result, visible_objects, show_masks=show_masks)
+            if overlay_key == self._preview_overlay_cache_key and self._preview_overlay_cache_image is not None:
+                overlay = self._preview_overlay_cache_image
+            else:
+                overlay = render_overlay(
+                    frame,
+                    result,
+                    opacity=self.opacity_slider.value() / 100.0,
+                    show_labels=self.show_labels_checkbox.isChecked(),
+                    show_masks=show_masks,
+                    show_track_ids=self.show_track_ids_checkbox.isChecked(),
+                    objects=visible_objects,
+                )
+                self._preview_overlay_cache_key = overlay_key
+                self._preview_overlay_cache_image = overlay
+            self.preview_canvas.set_image(overlay)
+        else:
+            self._preview_overlay_cache_key = None
+            self._preview_overlay_cache_image = None
+            self.preview_canvas.set_image(frame)
         self.preview_canvas.set_prompt_overlays(self.state.points, self.state.boxes)
         self.preview_canvas.set_prompt_mask_preview(self._current_mask_preview())
         self.preview_canvas.set_manual_mask_preview(self._current_manual_mask_preview())
@@ -3691,7 +3791,6 @@ class SAM3MainWindow(QtWidgets.QMainWindow):
         target_index = max(0, min(index, self._streaming_batch_total - 1))
         self.seek_slider.setValue(target_index)
         self.state.current_frame_index = target_index
-        self._display_current_result()
         QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
 

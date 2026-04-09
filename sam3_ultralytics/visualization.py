@@ -33,16 +33,18 @@ def render_overlay(
     show_track_ids: bool = True,
     visible_track_ids: set[int] | None = None,
     visible_labels: set[str] | None = None,
+    objects: list | None = None,
 ) -> np.ndarray:
     """Render a compact overlay for a normalized result."""
     canvas = image.copy()
-    objects = []
-    for obj in result.objects:
-        if visible_track_ids is not None and obj.track_id not in visible_track_ids:
-            continue
-        if visible_labels is not None and obj.label not in visible_labels:
-            continue
-        objects.append(obj)
+    if objects is None:
+        objects = []
+        for obj in result.objects:
+            if visible_track_ids is not None and obj.track_id not in visible_track_ids:
+                continue
+            if visible_labels is not None and obj.label not in visible_labels:
+                continue
+            objects.append(obj)
     if show_masks:
         tint = np.zeros_like(canvas)
         for obj in objects:
