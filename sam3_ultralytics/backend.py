@@ -93,10 +93,23 @@ class SAM3Ultralytics:
         return self
 
     @staticmethod
+    def _binary_mask(mask: object) -> np.ndarray | None:
+        if mask is None:
+            return None
+        array = np.asarray(mask)
+        if array.ndim == 3:
+            if array.shape[0] <= 4 and array.shape[1:] != array.shape[:2]:
+                array = np.any(array, axis=0)
+            else:
+                array = np.any(array, axis=-1)
+        return array if array.dtype == np.bool_ else (array > 0)
+
+    @classmethod
     def _first_object_mask(result: PredictionResult) -> np.ndarray | None:
         if not result.objects:
             return None
-        return np.asarray(result.objects[0].mask, dtype=np.float32).copy()
+        mask = cls._binary_mask(result.objects[0].mask)
+        return None if mask is None else np.array(mask, dtype=np.bool_, copy=True)
 
     @staticmethod
     def _mask_metadata(mask_id: int | None = None, mask_label: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -261,7 +274,9 @@ class SAM3Ultralytics:
         expanded_sources = expand_sources(sources)
         results: list[PredictionResult] = []
         first_result_mask: np.ndarray | None = None
-        target_reference_mask = None if mask_input is None else np.asarray(mask_input, dtype=np.float32).copy()
+        target_reference_mask = self._binary_mask(mask_input)
+        if target_reference_mask is not None:
+            target_reference_mask = np.array(target_reference_mask, dtype=np.bool_, copy=True)
         resolved_track_id = int(mask_id or 1) if (mask_input is not None or mask_id is not None or mask_label is not None) else None
         resolved_mask_label = str(mask_label).strip() or None if mask_label is not None else None
         total = len(expanded_sources)
@@ -303,9 +318,11 @@ class SAM3Ultralytics:
             )
             reference_mask = None
             if current_mask is not None:
-                reference_mask = np.asarray(current_mask, dtype=np.float32).copy()
+                reference_mask = self._binary_mask(current_mask)
+                if reference_mask is not None:
+                    reference_mask = np.array(reference_mask, dtype=np.bool_, copy=True)
             elif target_reference_mask is not None:
-                reference_mask = np.asarray(target_reference_mask, dtype=np.float32).copy()
+                reference_mask = np.array(target_reference_mask, dtype=np.bool_, copy=True)
 
             should_filter_target = (
                 resolved_track_id is not None
@@ -321,7 +338,7 @@ class SAM3Ultralytics:
                     fallback_allowed=True,
                 )
                 if target_reference_mask is not None:
-                    result.prompt_mask = np.asarray(target_reference_mask, dtype=np.float32).copy()
+                    result.prompt_mask = np.array(target_reference_mask, dtype=np.bool_, copy=True)
                 result.tracking_metadata.update(
                     {
                         "tracking_mode": "image_sequence_prompt_target_filter",

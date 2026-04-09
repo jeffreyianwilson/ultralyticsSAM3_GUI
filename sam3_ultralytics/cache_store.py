@@ -396,6 +396,7 @@ class CacheStore:
     def _write_result_archive(self, target: Path, result: PredictionResult) -> PredictionResult:
         _invalidate_archive_runtime_cache(target)
         object_masks = [np.asarray(obj.mask) for obj in result.objects]
+        prompt_masks = None if result.prompt_mask is None else np.asarray(result.prompt_mask)
         metadata = {
             "version": ARCHIVE_VERSION,
             "type": "result",
@@ -417,14 +418,13 @@ class CacheStore:
                 }
                 for obj in result.objects
             ],
-            "prompt_mask_count": 0 if result.prompt_mask is None else (1 if np.asarray(result.prompt_mask).ndim == 2 else int(np.asarray(result.prompt_mask).shape[0])),
+            "prompt_mask_count": 0 if prompt_masks is None else (1 if prompt_masks.ndim == 2 else int(prompt_masks.shape[0])),
         }
         payload: dict[str, np.ndarray] = {
             "metadata_json": np.asarray(json.dumps(metadata, separators=(",", ":"))),
             **_archive_payload("object", object_masks),
         }
-        if result.prompt_mask is not None:
-            prompt_masks = np.asarray(result.prompt_mask)
+        if prompt_masks is not None:
             if prompt_masks.ndim == 2:
                 prompt_list = [prompt_masks]
             elif prompt_masks.ndim == 3:
@@ -483,7 +483,7 @@ class CacheStore:
         target_dir.mkdir(parents=True, exist_ok=True)
         token = self._safe_token(key)
         target = target_dir / f"{token}.npz"
-        return self._write_mask_archive(target, np.asarray(array))
+        return self._write_mask_archive(target, array)
 
     def write_result(self, namespace: str, key: str, result: PredictionResult) -> PredictionResult:
         target_dir = self.result_dir / namespace
